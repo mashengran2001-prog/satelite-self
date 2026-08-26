@@ -112,6 +112,8 @@ pub struct AppUpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub update_available: bool,
+    /// The running build is newer than the latest public GitHub release.
+    pub ahead_of_latest: bool,
     /// True when served from the local cache without touching the network.
     pub cached: bool,
     /// Unix seconds of the underlying check (cached or fresh).
@@ -129,6 +131,9 @@ struct AppUpdateCache {
     checked_at: Option<u64>,
     /// Earliest unix seconds the next auto check may run (failure backoff).
     next_try_at: u64,
+    /// Package version this answer was computed for. Old caches without it
+    /// are ignored unless they already prove a newer release exists.
+    checked_for_version: Option<String>,
 }
 
 const APP_UPDATE_CACHE_FILE: &str = "update_cache.json";
@@ -148,6 +153,22 @@ fn store_app_update_cache(state: &AppState, cache: &AppUpdateCache) {
     if let Ok(json) = serde_json::to_vec(cache) {
         let _ = std::fs::write(state.app_data_dir.join(APP_UPDATE_CACHE_FILE), json);
     }
+}
+
+/// A cached answer is worth reusing only when it is valid for the running
+/// version, or when it already proves a newer release exists. A cached
+/// "no update" from before a release would otherwise hide it for the TTL.
+fn can_serve_cached(cache: &AppUpdateCache, current: &str) -> bool {
+    if let Some(checked_for) = cache.checked_for_version.as_deref() {
+        if checked_for == current {
+            return true;
+        }
+    }
+    cache
+        .latest_version
+        .as_deref()
+        .map(|version| is_newer_version(version, current))
+        .unwrap_or(false)
 }
 
 /// Latest app release from GitHub, for the Settings version tab. Routing
@@ -171,7 +192,7 @@ pub async fn check_app_update(
     let cache = load_app_update_cache(&state);
     let force = force.unwrap_or(false);
 
-    if !force {
+    if !force && can_serve_cached(&cache, &current) {
         if let (Some(version), Some(checked_at)) = (&cache.latest_version, cache.checked_at) {
             let fresh = now.saturating_sub(checked_at) < APP_UPDATE_TTL_SECS;
             let backoff_hold = now < cache.next_try_at;
@@ -197,23 +218,31 @@ pub async fn check_app_update(
                     latest_version: Some(version.clone()),
                     checked_at: Some(now),
                     next_try_at: 0,
+                    checked_for_version: Some(current.clone()),
                 },
             );
             Ok(app_update_info(&current, &version, Some(now), false))
         }
         Err(error) => {
-            // Network failed: serve the stale cache when we have one and push
-            // the next auto attempt out rather than retrying on every open.
-            if let (Some(version), Some(checked_at)) = (&cache.latest_version, cache.checked_at) {
-                store_app_update_cache(
-                    &state,
-                    &AppUpdateCache {
-                        latest_version: Some(version.clone()),
-                        checked_at: Some(checked_at),
-                        next_try_at: now + APP_UPDATE_FAILURE_BACKOFF_SECS,
-                    },
-                );
-                Ok(app_update_info(&current, version, Some(checked_at), true))
+            // Network failed: serve a still-valid cache when we have one and
+            // push the next auto attempt out rather than retrying on every
+            // open. Never present an answer that this version hasn't checked.
+            if can_serve_cached(&cache, &current) {
+                if let (Some(version), Some(checked_at)) = (&cache.latest_version, cache.checked_at)
+                {
+                    store_app_update_cache(
+                        &state,
+                        &AppUpdateCache {
+                            latest_version: Some(version.clone()),
+                            checked_at: Some(checked_at),
+                            next_try_at: now + APP_UPDATE_FAILURE_BACKOFF_SECS,
+                            checked_for_version: cache.checked_for_version.clone(),
+                        },
+                    );
+                    Ok(app_update_info(&current, version, Some(checked_at), true))
+                } else {
+                    Err(error.to_string())
+                }
             } else {
                 Err(error.to_string())
             }
@@ -233,6 +262,7 @@ fn app_update_info(
         // latest reads like the package version next to it (1.0.9, not v1.0.9).
         latest_version: latest.trim_start_matches('v').to_string(),
         update_available: is_newer_version(latest, current),
+        ahead_of_latest: is_newer_version(current, latest),
         cached,
         checked_at,
     }
@@ -465,7 +495,39 @@ pub async fn get_lan_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer_version;
+    use super::{app_update_info, AppUpdateCache, can_serve_cached, is_newer_version};
+
+    fn cache(latest: &str, checked_for: Option<&str>) -> AppUpdateCache {
+        AppUpdateCache {
+            latest_version: Some(latest.to_string()),
+            checked_at: Some(0),
+            next_try_at: 0,
+            checked_for_version: checked_for.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cached_up_to_date_answer_reused_only_for_same_version() {
+        assert!(can_serve_cached(&cache("v1.1.0", Some("1.1.0")), "1.1.0"));
+        assert!(!can_serve_cached(&cache("v1.1.0", Some("1.0.9")), "1.1.0"));
+    }
+
+    #[test]
+    fn older_positive_answers_still_show_an_update() {
+        assert!(can_serve_cached(&cache("v1.2.0", Some("1.1.0")), "1.1.0"));
+    }
+
+    #[test]
+    fn legacy_cache_without_checked_version_is_not_trusted() {
+        assert!(!can_serve_cached(&cache("v1.0.9", None), "1.1.0"));
+    }
+
+    #[test]
+    fn running_build_ahead_of_release_has_an_explicit_status() {
+        let info = app_update_info("1.1.1", "v1.1.0", None, false);
+        assert!(!info.update_available);
+        assert!(info.ahead_of_latest);
+    }
 
     #[test]
     fn bundled_ahead_of_latest_release_is_not_an_update() {

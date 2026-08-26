@@ -1968,6 +1968,39 @@ tr.row-active {
   justify-content: flex-end;
 }
 
+.grid-column-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.grid-column-options {
+  max-width: 0;
+  padding-left: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateX(-6px) scale(0.96);
+  pointer-events: none;
+  transition:
+    max-width 0.18s ease,
+    padding-left 0.18s ease,
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.grid-column-toggle:has(.grid-view-mode .glass-seg-btn[data-value="grid"]:hover)
+  > .grid-column-options,
+.grid-column-toggle:has(.grid-view-mode .glass-seg-btn[data-value="grid"]:focus-visible)
+  > .grid-column-options,
+.grid-column-options:hover,
+.grid-column-options:focus-within {
+  max-width: 12rem;
+  padding-left: 0.45rem;
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  pointer-events: auto;
+}
+
 .segmented.compact {
   display: inline-grid;
   grid-auto-flow: column;

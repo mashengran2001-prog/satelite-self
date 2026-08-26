@@ -102,6 +102,7 @@ export function GlassSeg({
           <button
             key={o.value}
             type="button"
+            data-value={o.value}
             className={`glass-seg-btn ${value === o.value ? "active" : ""}`}
             disabled={isDisabled}
             title={titles?.[o.value]}

@@ -446,6 +446,7 @@ export function checkAppUpdate(force = false) {
     current_version: string;
     latest_version: string;
     update_available: boolean;
+    ahead_of_latest: boolean;
     cached: boolean;
     checked_at: number | null;
   }>("check_app_update", { force });

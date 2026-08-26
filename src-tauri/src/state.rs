@@ -71,7 +71,7 @@ impl KernelSelectionPoll {
 mod kernel_selection_poll_tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener};
+    use std::net::TcpListener;
     use std::sync::mpsc;
     use std::sync::Arc;
 
@@ -298,14 +298,40 @@ mod kernel_selection_poll_tests {
         let (release_tx, release_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("accept selector request");
-            let mut request = [0u8; 4096];
-            socket.read(&mut request).expect("read selector request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).expect("read selector request");
+                assert!(read > 0, "selector request closed before its body arrived");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
             seen_tx.send(()).expect("signal request received");
             release_rx.recv().expect("release fake response");
             socket
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .expect("write selector response");
-            let _ = socket.shutdown(Shutdown::Both);
+            socket.flush().expect("flush selector response");
         });
 
         let operation_state = Arc::clone(&state);

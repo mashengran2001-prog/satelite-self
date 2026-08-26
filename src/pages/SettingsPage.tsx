@@ -132,6 +132,7 @@ export function SettingsPage() {
     current_version: string;
     latest_version: string;
     update_available: boolean;
+    ahead_of_latest: boolean;
     cached: boolean;
     checked_at: number | null;
   } | null>(null);
@@ -1444,6 +1445,8 @@ export function SettingsPage() {
                     <span className="pill warn">
                       {t("settings.coreUpdateAvail")}
                     </span>
+                  ) : appUpdate?.ahead_of_latest ? (
+                    <span className="pill ok">{t("settings.appAhead")}</span>
                   ) : appUpdate ? (
                     <span className="pill ok">{t("settings.appUpToDate")}</span>
                   ) : null}

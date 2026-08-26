@@ -585,25 +585,31 @@ export function NodesPage() {
             </GlassButton>
           )}
 
-          <GlassSeg
-            value={viewMode}
-            ariaLabel="视图"
-            onChange={(v) => setViewMode(v as ViewMode)}
-            options={[
-              { value: "list", label: "列表" },
-              { value: "grid", label: "网格" },
-            ]}
-          />
+          <div className="grid-column-toggle">
+            <div className="grid-view-mode">
+              <GlassSeg
+                value={viewMode}
+                ariaLabel="视图"
+                onChange={(v) => setViewMode(v as ViewMode)}
+                options={[
+                  { value: "list", label: "列表" },
+                  { value: "grid", label: "网格" },
+                ]}
+              />
+            </div>
 
-          <GlassSeg
-            value={String(columnCount)}
-            ariaLabel="网格列数"
-            onChange={(v) => {
-              setColumnCount(Number(v) as GridColumnCount);
-              if (viewMode !== "grid") setViewMode("grid");
-            }}
-            options={GRID_COLUMN_OPTIONS}
-          />
+            <div className="grid-column-options">
+              <GlassSeg
+                value={String(columnCount)}
+                ariaLabel="网格列数"
+                onChange={(v) => {
+                  setColumnCount(Number(v) as GridColumnCount);
+                  if (viewMode !== "grid") setViewMode("grid");
+                }}
+                options={GRID_COLUMN_OPTIONS}
+              />
+            </div>
+          </div>
         </div>
       </header>
 
