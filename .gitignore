@@ -1,0 +1,58 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust / Tauri build output
+target
+src-tauri/target
+src-tauri/gen/schemas
+
+# Bundled sing-box core (download via scripts/fetch-bundled-core-*.sh)
+src-tauri/resources/bin/**/sing-box
+src-tauri/resources/bin/**/sing-box.exe
+src-tauri/resources/bin/**/libcronet.*
+src-tauri/resources/bin/**/*.tar.gz
+
+# Bundled Xray core + geodata (download via scripts/fetch-bundled-xray-*.sh)
+src-tauri/resources/bin/**/xray
+src-tauri/resources/bin/**/xray.exe
+src-tauri/resources/bin/**/xray-version.txt
+src-tauri/resources/bin/**/geosite.dat
+src-tauri/resources/bin/**/geoip.dat
+src-tauri/resources/bin/**/wintun.dll
+
+# Bundled mihomo core + geodata (download via scripts/fetch-bundled-mihomo-*.sh)
+src-tauri/resources/bin/**/mihomo
+src-tauri/resources/bin/**/mihomo.exe
+src-tauri/resources/bin/**/mihomo-version.txt
+src-tauri/resources/bin/**/mihomo-geodata/
+
+# Bundled built-in rule sets (download via scripts/fetch-bundled-rule-sets.sh)
+src-tauri/resources/rule-sets/*.srs
+nul
+.zcode
+
+# Local install/dev artifacts
+installed/
+cache.db
