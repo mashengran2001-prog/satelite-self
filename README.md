@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mashengran2001-prog/satelite-proxy/stargazers"><img src="https://img.shields.io/github/stars/mashengran2001-prog/satelite-proxy?style=social" alt="Stars" /></a>
+  <a href="https://github.com/mashengran2001-prog/satelite-self/stargazers"><img src="https://img.shields.io/github/stars/mashengran2001-prog/satelite-self?style=social" alt="Stars" /></a>
   &nbsp;
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-111111?logo=apple&logoColor=white" alt="macOS" />
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows&logoColor=white" alt="Windows" />
@@ -74,7 +74,7 @@
 | Windows         | ✅ 支持 |
 | Linux           | 🚧 计划中 |
 
-> Satelite Proxy 仍在持续开发中，升级前请备份重要的配置文件。
+> Satelite Self 仍在持续开发中，升级前请备份重要的配置文件。
 
 ## 🛠 技术栈
 
@@ -139,7 +139,7 @@ pwsh scripts/build-windows.ps1 -Bundle msi  # MSI
 
 ---
 
-用着顺手的话，点一颗 [Star](https://github.com/mashengran2001-prog/satelite-proxy)，卫星会飞得更稳一点。
+用着顺手的话，点一颗 [Star](https://github.com/mashengran2001-prog/satelite-self)，卫星会飞得更稳一点。
 
 ## 友情链接
 

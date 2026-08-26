@@ -1,7 +1,7 @@
 //! Live download of sing-box core (network required).
-//! Run: `cargo test -p satelite-proxy --test download_core_live -- --ignored --nocapture`
+//! Run: `cargo test -p satelite-self --test download_core_live -- --ignored --nocapture`
 
-use satelite_proxy_lib::download_core_to;
+use satelite_self_lib::download_core_to;
 use std::path::PathBuf;
 
 #[tokio::test]

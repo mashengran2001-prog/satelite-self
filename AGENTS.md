@@ -1,4 +1,4 @@
-# AGENTS.md — Satelite Proxy 项目地图
+# AGENTS.md — Satelite Self 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
 最后核对：2026-08-25（三内核：sing-box / Xray / mihomo；含订阅导入修复与 IPPure 纯净度检测）。
@@ -108,7 +108,7 @@ scripts/memory-profile/                           # WebView2 内存剖析（CDP 
 ## 3. 目录速览
 
 ```
-satelite-proxy/
+satelite-self/
 ├── src/                     # React 前端（~26.5k 行）
 │   ├── api.ts               # ★ 前后端唯一桥：全部 invoke 封装（726 行）
 │   ├── types.ts             # ★ 前端共享类型（与 Rust domain 对应，538 行）

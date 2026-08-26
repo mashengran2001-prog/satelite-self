@@ -51,10 +51,27 @@ const LIST_ROW_HEIGHT = 49;
 const GRID_ROW_HEIGHT = 94;
 const PAGE_SIZE = 200;
 
-function gridColumns() {
+function gridColumns(): GridColumnCount {
   if (window.innerWidth <= 720) return 2;
   if (window.innerWidth <= 960) return 3;
   return 4;
+}
+
+type GridColumnCount = 2 | 3 | 4;
+
+const GRID_COLUMN_OPTIONS = [
+  { value: "2", label: "2列" },
+  { value: "3", label: "3列" },
+  { value: "4", label: "4列" },
+];
+
+function savedGridColumns(): GridColumnCount | null {
+  const value = Number(localStorage.getItem("nodes.gridColumns"));
+  return value === 2 || value === 3 || value === 4 ? value : null;
+}
+
+function defaultGridColumns(): GridColumnCount {
+  return savedGridColumns() ?? gridColumns();
 }
 
 /** Render latency cell: spinner / ms / timeout / needs-core / dash */
@@ -141,10 +158,16 @@ export function NodesPage() {
   // Node ids whose last test used method "unsupported" (UDP-only protocol,
   // core not running) — shown as "start core to test" instead of "timeout".
   const [unsupportedIds, setUnsupportedIds] = useState<Set<string>>(new Set());
-  const [columnCount, setColumnCount] = useState(gridColumns);
+  const [columnCount, setColumnCount] = useState<GridColumnCount>(
+    defaultGridColumns,
+  );
 
   useEffect(() => {
-    const update = () => setColumnCount(gridColumns());
+    localStorage.setItem("nodes.gridColumns", String(columnCount));
+  }, [columnCount]);
+
+  useEffect(() => {
+    const update = () => setColumnCount(savedGridColumns() ?? gridColumns());
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
@@ -571,6 +594,15 @@ export function NodesPage() {
               { value: "grid", label: "网格" },
             ]}
           />
+
+          {viewMode === "grid" && (
+            <GlassSeg
+              value={String(columnCount)}
+              ariaLabel="网格列数"
+              onChange={(v) => setColumnCount(Number(v) as GridColumnCount)}
+              options={GRID_COLUMN_OPTIONS}
+            />
+          )}
         </div>
       </header>
 
@@ -689,7 +721,12 @@ export function NodesPage() {
           {gridRange.paddingTop > 0 && (
             <div style={{ height: gridRange.paddingTop }} aria-hidden="true" />
           )}
-          <div className={`node-grid ${virtualized ? "node-grid-virtual" : ""}`}>
+          <div
+            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}`}
+            style={{
+              gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
+            }}
+          >
             {displayed.slice(gridRange.start, gridRange.end).map((n) => {
               const active = n.id === currentId;
               const isTesting = testingIds.has(n.id);

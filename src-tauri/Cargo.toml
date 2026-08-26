@@ -1,12 +1,12 @@
 [package]
-name = "satelite-proxy"
+name = "satelite-self"
 version = "1.0.4"
 description = "Satelite — lightweight sing-box desktop client"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "satelite_proxy_lib"
+name = "satelite_self_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

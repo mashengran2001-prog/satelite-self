@@ -1200,6 +1200,7 @@ impl AppState {
         let node_id = node_id.to_string();
         let (settings, was_kernel) = self.with_store_mut(|store| {
             let was_kernel = apply_selected_node(&mut store.settings, node_id, manual);
+            store.remember_current_nodes();
             Ok((store.settings.clone(), was_kernel))
         })?;
         let restart_needed =
@@ -1298,6 +1299,7 @@ impl AppState {
 
         if let Err(e) = self.with_store_mut(|store| {
             store.settings.current_node_id = Some(node_id.clone());
+            store.remember_current_nodes();
             Ok(())
         }) {
             app_log::warn(
@@ -1313,6 +1315,15 @@ impl AppState {
     }
 
     pub fn shutdown_runtime(&self) {
+        if let Err(e) = self.with_store_mut(|store| {
+            store.remember_current_nodes();
+            Ok(())
+        }) {
+            app_log::warn(
+                "settings",
+                format!("remember last node on exit failed: {e}"),
+            );
+        }
         let mut runtime = self.lock_runtime();
         if runtime.shutdown() {
             drop(runtime);

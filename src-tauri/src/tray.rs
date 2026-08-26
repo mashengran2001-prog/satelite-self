@@ -184,17 +184,23 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 window_ctrl::show_main(app);
             }
             "start" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    let res = app.path().resource_dir().ok();
-                    let _ = state.start_proxy(res.as_deref(), true);
-                }
-                refresh_icon(app);
+                let handle = app.clone();
+                let res = app.path().resource_dir().ok();
+                std::thread::spawn(move || {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        let _ = state.start_proxy(res.as_deref(), true);
+                    }
+                    refresh_icon(&handle);
+                });
             }
             "stop" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    let _ = state.stop_proxy();
-                }
-                refresh_icon(app);
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        let _ = state.stop_proxy();
+                    }
+                    refresh_icon(&handle);
+                });
             }
             "copy_env" => {
                 copy_proxy_env(app);

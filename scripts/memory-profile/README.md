@@ -12,7 +12,7 @@
    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" pnpm tauri dev
    ```
 
-2. 进程树内存（按父进程链过滤出属于 satelite-proxy 的 msedgewebview2 进程）：
+2. 进程树内存（按父进程链过滤出属于 satelite-self 的 msedgewebview2 进程）：
 
    ```powershell
    pwsh scripts/memory-profile/proc_mem.ps1 -RootName satelite

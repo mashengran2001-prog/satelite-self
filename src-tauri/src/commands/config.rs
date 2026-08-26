@@ -39,10 +39,18 @@ pub struct NodePage {
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    state
-        .with_store(|store| Ok(store.settings.clone()))
-        .map_err(|e| e.to_string())
+pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| Ok(store.settings.clone()))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("settings task: {e}"))?
 }
 
 /// Rotate the clash_api secret (user-triggered from Settings → Ports).
@@ -365,156 +373,179 @@ pub fn rename_node(
 }
 
 #[tauri::command]
-pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
-    state
-        .with_store(|store| {
-            let names: HashMap<&str, &str> = store
-                .subscriptions
-                .iter()
-                .map(|s| (s.id.as_str(), s.name.as_str()))
-                .collect();
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
-            // Under a core that cannot serve a protocol, such nodes are
-            // hidden from listings entirely (they reappear after switching).
-            let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
-            Ok(store
-                .nodes
-                .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
-                .filter(|n| core_kind.supports_node(&n.node))
-                .map(|n| ListedNode {
-                    node: n.node.clone(),
-                    subscription_id: n.subscription_id.clone(),
-                    subscription_name: names
-                        .get(n.subscription_id.as_str())
-                        .copied()
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .collect())
-        })
-        .map_err(|e| e.to_string())
+pub async fn list_all_nodes(app: AppHandle) -> Result<Vec<ListedNode>, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| {
+                let names: HashMap<&str, &str> = store
+                    .subscriptions
+                    .iter()
+                    .map(|s| (s.id.as_str(), s.name.as_str()))
+                    .collect();
+                let enabled: std::collections::HashSet<&str> = store
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.id.as_str())
+                    .collect();
+                // Under a core that cannot serve a protocol, such nodes are
+                // hidden from listings entirely (they reappear after switching).
+                let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
+                Ok(store
+                    .nodes
+                    .iter()
+                    .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                    .filter(|n| core_kind.supports_node(&n.node))
+                    .map(|n| ListedNode {
+                        node: n.node.clone(),
+                        subscription_id: n.subscription_id.clone(),
+                        subscription_name: names
+                            .get(n.subscription_id.as_str())
+                            .copied()
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect())
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list nodes task: {e}"))?
 }
 
 #[tauri::command]
-pub fn list_nodes_page(
-    state: State<'_, AppState>,
+pub async fn list_nodes_page(
+    app: AppHandle,
     query: Option<String>,
     sort_mode: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<NodePage, String> {
-    state
-        .with_store(|store| {
-            let names: HashMap<&str, &str> = store
-                .subscriptions
-                .iter()
-                .map(|s| (s.id.as_str(), s.name.as_str()))
-                .collect();
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
-            let query = query.unwrap_or_default().trim().to_lowercase();
-            // Hide protocols the active core cannot serve (see list_all_nodes).
-            let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
-            let mut nodes: Vec<ListedNode> = store
-                .nodes
-                .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
-                .filter(|n| core_kind.supports_node(&n.node))
-                .filter(|n| {
-                    query.is_empty()
-                        || n.node.name.to_lowercase().contains(&query)
-                        || n.node.server.to_lowercase().contains(&query)
-                        || n.node.protocol.as_str().to_lowercase().contains(&query)
-                        || names
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| {
+                let names: HashMap<&str, &str> = store
+                    .subscriptions
+                    .iter()
+                    .map(|s| (s.id.as_str(), s.name.as_str()))
+                    .collect();
+                let enabled: std::collections::HashSet<&str> = store
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.id.as_str())
+                    .collect();
+                let query = query.unwrap_or_default().trim().to_lowercase();
+                // Hide protocols the active core cannot serve (see list_all_nodes).
+                let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
+                let mut nodes: Vec<ListedNode> = store
+                    .nodes
+                    .iter()
+                    .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                    .filter(|n| core_kind.supports_node(&n.node))
+                    .filter(|n| {
+                        query.is_empty()
+                            || n.node.name.to_lowercase().contains(&query)
+                            || n.node.server.to_lowercase().contains(&query)
+                            || n.node.protocol.as_str().to_lowercase().contains(&query)
+                            || names
+                                .get(n.subscription_id.as_str())
+                                .is_some_and(|name| name.to_lowercase().contains(&query))
+                    })
+                    .map(|n| ListedNode {
+                        node: n.node.clone(),
+                        subscription_id: n.subscription_id.clone(),
+                        subscription_name: names
                             .get(n.subscription_id.as_str())
-                            .is_some_and(|name| name.to_lowercase().contains(&query))
+                            .copied()
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect();
+                match sort_mode.as_deref() {
+                    Some("name") => nodes.sort_by_cached_key(|n| n.node.name.to_lowercase()),
+                    Some("latency") => nodes.sort_by(|a, b| {
+                        let score = |n: &ListedNode| match n.node.latency_ms {
+                            Some(ms) => (0u8, ms as u64),
+                            None if n.node.latency_at.is_some() => (1, 0),
+                            None => (2, 0),
+                        };
+                        score(a)
+                            .cmp(&score(b))
+                            .then_with(|| {
+                                a.node.name.to_lowercase().cmp(&b.node.name.to_lowercase())
+                            })
+                    }),
+                    _ => {}
+                }
+                let total = nodes.len();
+                let offset = offset.unwrap_or(0).min(total);
+                let limit = limit.unwrap_or(200).clamp(1, 500);
+                let nodes = nodes.into_iter().skip(offset).take(limit).collect();
+                Ok(NodePage {
+                    nodes,
+                    total,
+                    offset,
                 })
-                .map(|n| ListedNode {
-                    node: n.node.clone(),
-                    subscription_id: n.subscription_id.clone(),
-                    subscription_name: names
-                        .get(n.subscription_id.as_str())
-                        .copied()
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .collect();
-            match sort_mode.as_deref() {
-                Some("name") => nodes.sort_by_cached_key(|n| n.node.name.to_lowercase()),
-                Some("latency") => nodes.sort_by(|a, b| {
-                    let score = |n: &ListedNode| match n.node.latency_ms {
-                        Some(ms) => (0u8, ms as u64),
-                        None if n.node.latency_at.is_some() => (1, 0),
-                        None => (2, 0),
-                    };
-                    score(a)
-                        .cmp(&score(b))
-                        .then_with(|| a.node.name.to_lowercase().cmp(&b.node.name.to_lowercase()))
-                }),
-                _ => {}
-            }
-            let total = nodes.len();
-            let offset = offset.unwrap_or(0).min(total);
-            let limit = limit.unwrap_or(200).clamp(1, 500);
-            let nodes = nodes.into_iter().skip(offset).take(limit).collect();
-            Ok(NodePage {
-                nodes,
-                total,
-                offset,
             })
-        })
-        .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list nodes page task: {e}"))?
 }
 
 #[tauri::command]
-pub fn list_node_ids(
-    state: State<'_, AppState>,
-    query: Option<String>,
-) -> Result<Vec<String>, String> {
-    state
-        .with_store(|store| {
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
-            let names: HashMap<&str, &str> = store
-                .subscriptions
-                .iter()
-                .map(|s| (s.id.as_str(), s.name.as_str()))
-                .collect();
-            let query = query.unwrap_or_default().trim().to_lowercase();
-            // Hide protocols the active core cannot serve (see list_all_nodes).
-            let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
-            Ok(store
-                .nodes
-                .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
-                .filter(|n| core_kind.supports_node(&n.node))
-                .filter(|n| {
-                    query.is_empty()
-                        || n.node.name.to_lowercase().contains(&query)
-                        || n.node.server.to_lowercase().contains(&query)
-                        || n.node.protocol.as_str().to_lowercase().contains(&query)
-                        || names
-                            .get(n.subscription_id.as_str())
-                            .is_some_and(|name| name.to_lowercase().contains(&query))
-                })
-                .map(|n| n.node.id.clone())
-                .collect())
-        })
-        .map_err(|e| e.to_string())
+pub async fn list_node_ids(app: AppHandle, query: Option<String>) -> Result<Vec<String>, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| {
+                let enabled: std::collections::HashSet<&str> = store
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.id.as_str())
+                    .collect();
+                let names: HashMap<&str, &str> = store
+                    .subscriptions
+                    .iter()
+                    .map(|s| (s.id.as_str(), s.name.as_str()))
+                    .collect();
+                let query = query.unwrap_or_default().trim().to_lowercase();
+                // Hide protocols the active core cannot serve (see list_all_nodes).
+                let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
+                Ok(store
+                    .nodes
+                    .iter()
+                    .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                    .filter(|n| core_kind.supports_node(&n.node))
+                    .filter(|n| {
+                        query.is_empty()
+                            || n.node.name.to_lowercase().contains(&query)
+                            || n.node.server.to_lowercase().contains(&query)
+                            || n.node.protocol.as_str().to_lowercase().contains(&query)
+                            || names
+                                .get(n.subscription_id.as_str())
+                                .is_some_and(|name| name.to_lowercase().contains(&query))
+                    })
+                    .map(|n| n.node.id.clone())
+                    .collect())
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list node ids task: {e}"))?
 }
 
 /// Nodes extracted read-only from a stored custom sing-box config body.
@@ -544,8 +575,16 @@ fn extract_custom_nodes(
 /// Custom profiles never feed the node store, so the stored config body is
 /// parsed on demand. Empty when not in custom runtime mode.
 #[tauri::command]
-pub fn list_custom_config_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
-    custom_config_nodes(&state)
+pub async fn list_custom_config_nodes(app: AppHandle) -> Result<Vec<ListedNode>, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        custom_config_nodes(&state)
+    })
+    .await
+    .map_err(|e| format!("list custom nodes task: {e}"))?
 }
 
 /// Shared body of [`list_custom_config_nodes`]; also feeds the custom-mode

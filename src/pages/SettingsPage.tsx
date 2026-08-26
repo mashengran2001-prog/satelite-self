@@ -46,7 +46,7 @@ type SettingsTab = "app" | "ports" | "rules" | "dns" | "hosts" | "core";
 const CUSTOM_BLOCKED_TABS = new Set(["rules", "dns", "hosts"]);
 
 /** Always-latest app release page, opened from the version tab. */
-const RELEASES_URL = "https://github.com/mashengran2001-prog/satelite-proxy/releases/latest";
+const RELEASES_URL = "https://github.com/mashengran2001-prog/satelite-self/releases/latest";
 
 // Accent preset names are picked from the i18n catalog rather than
 // AccentPreset.name (theme/accents.ts), which is display data only and not

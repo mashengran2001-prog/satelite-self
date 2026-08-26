@@ -15,9 +15,9 @@ use std::sync::Arc;
 use tar::Archive;
 
 const APP_GITHUB_LATEST: &str =
-    "https://api.github.com/repos/mashengran2001-prog/satelite-proxy/releases/latest";
+    "https://api.github.com/repos/mashengran2001-prog/satelite-self/releases/latest";
 const APP_RELEASES_PAGE: &str =
-    "https://github.com/mashengran2001-prog/satelite-proxy/releases/latest";
+    "https://github.com/mashengran2001-prog/satelite-self/releases/latest";
 const MAX_CORE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 
 fn github_latest_url(kind: CoreKind) -> String {
@@ -132,7 +132,7 @@ async fn fetch_release_json(url: &str, proxy_url: Option<&str>) -> AppResult<GhR
         .map_err(|e| AppError::Core(format!("parse github release: {e}")))
 }
 
-/// Latest release tag of the app itself (mashengran2001-prog/satelite-proxy), used by the
+/// Latest release tag of the app itself (mashengran2001-prog/satelite-self), used by the
 /// Settings version tab to flag app updates. Tag only — no asset picking,
 /// and unlike the core check there is no pinned fallback: if the API is
 /// unreachable the caller surfaces the error instead of guessing.
@@ -277,7 +277,7 @@ fn http_client_with_redirect(
 ) -> AppResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
-        .user_agent("SateliteProxy/0.1 (core-downloader)")
+        .user_agent("SateliteSelf/0.1 (core-downloader)")
         .redirect(policy);
     if let Some(proxy_url) = proxy_url {
         builder = builder.proxy(
@@ -296,7 +296,7 @@ mod app_update_tests {
     fn extracts_tag_from_absolute_url() {
         assert_eq!(
             extract_tag_from_release_url(
-                "https://github.com/mashengran2001-prog/satelite-proxy/releases/tag/1.0.9"
+                "https://github.com/mashengran2001-prog/satelite-self/releases/tag/1.0.9"
             )
             .unwrap(),
             "v1.0.9"
@@ -307,7 +307,7 @@ mod app_update_tests {
     fn extracts_tag_from_relative_url() {
         assert_eq!(
             extract_tag_from_release_url(
-                "/mashengran2001-prog/satelite-proxy/releases/tag/v1.1.0"
+                "/mashengran2001-prog/satelite-self/releases/tag/v1.1.0"
             )
             .unwrap(),
             "v1.1.0"
@@ -318,7 +318,7 @@ mod app_update_tests {
     fn strips_query_string() {
         assert_eq!(
             extract_tag_from_release_url(
-                "https://github.com/mashengran2001-prog/satelite-proxy/releases/tag/1.2.0?foo=bar"
+                "https://github.com/mashengran2001-prog/satelite-self/releases/tag/1.2.0?foo=bar"
             )
             .unwrap(),
             "v1.2.0"
@@ -328,7 +328,7 @@ mod app_update_tests {
     #[test]
     fn rejects_urls_without_a_tag_segment() {
         assert!(
-            extract_tag_from_release_url("https://github.com/mashengran2001-prog/satelite-proxy")
+            extract_tag_from_release_url("https://github.com/mashengran2001-prog/satelite-self")
                 .is_err()
         );
     }

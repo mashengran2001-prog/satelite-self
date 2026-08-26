@@ -137,7 +137,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "satelite-proxy-owner-{name}-{}-{nonce}",
+            "satelite-self-owner-{name}-{}-{nonce}",
             std::process::id()
         ))
     }

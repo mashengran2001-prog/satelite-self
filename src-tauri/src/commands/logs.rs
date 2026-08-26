@@ -1,7 +1,7 @@
 use crate::app_log::{self, LogBatch, LogLevel};
 use crate::state::AppState;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
 #[tauri::command]
 pub async fn list_app_logs(
@@ -39,20 +39,28 @@ pub struct CoreLogTail {
 /// API, so the Xray-mode traffic page streams the core log instead — at
 /// `info` level Xray logs accepted connections and routing decisions there.
 #[tauri::command]
-pub fn get_core_log_tail(
-    state: State<'_, AppState>,
+pub async fn get_core_log_tail(
+    app: AppHandle,
     limit: Option<usize>,
 ) -> Result<CoreLogTail, String> {
-    let limit = limit.unwrap_or(300).clamp(1, 1_000);
-    let tail = state.lock_runtime().core.core_log_tail(limit);
-    Ok(match tail {
-        Some((path, lines)) => CoreLogTail {
-            path: Some(path.display().to_string()),
-            lines,
-        },
-        None => CoreLogTail {
-            path: None,
-            lines: Vec::new(),
-        },
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        let limit = limit.unwrap_or(300).clamp(1, 1_000);
+        let tail = state.lock_runtime().core.core_log_tail(limit);
+        Ok(match tail {
+            Some((path, lines)) => CoreLogTail {
+                path: Some(path.display().to_string()),
+                lines,
+            },
+            None => CoreLogTail {
+                path: None,
+                lines: Vec::new(),
+            },
+        })
     })
+    .await
+    .map_err(|e| format!("core log tail task: {e}"))?
 }

@@ -1425,7 +1425,7 @@ pub fn generate_api_secret() -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{:?}", std::time::SystemTime::now()).as_bytes());
     hasher.update(std::process::id().to_string().as_bytes());
-    hasher.update(b"satelite-proxy-clash-api");
+    hasher.update(b"satelite-self-clash-api");
     hex::encode(hasher.finalize())[..32].to_string()
 }
 

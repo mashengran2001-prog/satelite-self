@@ -33,37 +33,44 @@ pub struct CoreInfo {
 
 /// Local core status only (no network). Prefer this for page load.
 #[tauri::command]
-pub fn get_core_info(
+pub async fn get_core_info(
     app: AppHandle,
-    state: State<'_, AppState>,
     kind: Option<String>,
 ) -> Result<CoreInfo, String> {
     let kind = parse_kind(kind);
-    let platform = detect_platform().map_err(|e| e.to_string())?;
-    let resource_dir = app.path().resource_dir().ok();
-    let res = resource_dir.as_deref();
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        let platform = detect_platform().map_err(|e| e.to_string())?;
+        let resource_dir = worker_app.path().resource_dir().ok();
+        let res = resource_dir.as_deref();
 
-    let (path, source) = inspect_core_bin(&state.app_data_dir, res, kind);
-    // Metadata-only inspection: do not stage/copy the bundled core during page load.
-    let version = active_core_version(&state.app_data_dir, res, kind);
-    let bundled_version = bundled_core_version(res, kind);
+        let (path, source) = inspect_core_bin(&state.app_data_dir, res, kind);
+        // Metadata-only inspection: do not stage/copy the bundled core during page load.
+        let version = active_core_version(&state.app_data_dir, res, kind);
+        let bundled_version = bundled_core_version(res, kind);
 
-    Ok(CoreInfo {
-        kind: kind.as_str().into(),
-        name: kind.display_name().into(),
-        installed: path.is_some(),
-        version,
-        path: path.map(|p| p.display().to_string()),
-        platform: platform.asset_suffix_for(kind).to_string(),
-        latest_version: None,
-        update_available: false,
-        source: match source {
-            CoreSource::Bundled => "bundled".into(),
-            CoreSource::Downloaded => "downloaded".into(),
-            CoreSource::Missing => "missing".into(),
-        },
-        bundled_version,
+        Ok(CoreInfo {
+            kind: kind.as_str().into(),
+            name: kind.display_name().into(),
+            installed: path.is_some(),
+            version,
+            path: path.map(|p| p.display().to_string()),
+            platform: platform.asset_suffix_for(kind).to_string(),
+            latest_version: None,
+            update_available: false,
+            source: match source {
+                CoreSource::Bundled => "bundled".into(),
+                CoreSource::Downloaded => "downloaded".into(),
+                CoreSource::Missing => "missing".into(),
+            },
+            bundled_version,
+        })
     })
+    .await
+    .map_err(|e| format!("core info task: {e}"))?
 }
 
 /// Remote latest version only (network). Call after local info is shown.
@@ -442,13 +449,18 @@ fn parse_version(v: &str) -> Vec<u32> {
 /// interface with a default route exists. `None` when there is no such
 /// address (e.g. fully offline).
 #[tauri::command]
-pub fn get_lan_ip() -> Option<String> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    match sock.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
-        _ => None,
-    }
+pub async fn get_lan_ip() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        sock.connect("8.8.8.8:80").ok()?;
+        match sock.local_addr().ok()?.ip() {
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
+            _ => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

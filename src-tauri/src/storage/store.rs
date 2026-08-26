@@ -689,6 +689,7 @@ impl AppStore {
             return Err(AppError::NotFound(id.to_string()));
         }
         self.nodes.retain(|n| n.subscription_id != id);
+        self.settings.last_node_by_subscription.remove(id);
         if self.settings.runtime_source().singbox_id() == Some(id) {
             self.settings
                 .set_runtime_source(crate::domain::RuntimeSource::Generated);
@@ -835,6 +836,27 @@ impl AppStore {
         Ok(())
     }
 
+    /// Persist the current selection under every enabled subscription that
+    /// contains that node, so switching away/back or closing can restore it.
+    pub fn remember_current_nodes(&mut self) {
+        let Some(cur) = self.settings.current_node_id.clone() else {
+            return;
+        };
+        let enabled: std::collections::HashSet<&str> = self
+            .subscriptions
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.id.as_str())
+            .collect();
+        for node in self.nodes.iter() {
+            if node.node.id == cur && enabled.contains(node.subscription_id.as_str()) {
+                self.settings
+                    .last_node_by_subscription
+                    .insert(node.subscription_id.clone(), cur.clone());
+            }
+        }
+    }
+
     /// Click card: exclusive → enable only this; Mix → toggle this.
     /// Does not change which file the kernel launches.
     pub fn activate_subscription(&mut self, id: &str) -> AppResult<()> {
@@ -864,6 +886,7 @@ impl AppStore {
                 if enabled_count <= 1 {
                     return Ok(());
                 }
+                self.remember_current_nodes();
                 if let Some(s) = self.subscriptions.iter_mut().find(|s| s.id == id) {
                     s.enabled = false;
                 }
@@ -871,8 +894,21 @@ impl AppStore {
                 s.enabled = true;
             }
         } else {
+            if self.subscriptions.iter().any(|s| s.enabled && s.id == id) {
+                return Ok(());
+            }
+            self.remember_current_nodes();
             for s in &mut self.subscriptions {
                 s.enabled = s.id == id;
+            }
+            if let Some(remembered) = self.settings.last_node_by_subscription.get(id).cloned() {
+                let still_exists = self
+                    .nodes
+                    .iter()
+                    .any(|n| n.subscription_id == id && n.node.id == remembered);
+                if still_exists {
+                    self.settings.current_node_id = Some(remembered);
+                }
             }
         }
         self.ensure_current_node_valid();
@@ -2862,5 +2898,45 @@ mod tests {
         assert_eq!(store.settings.runtime_source, "singbox:sb1");
         store.remove_subscription("sb1").unwrap();
         assert_eq!(store.settings.runtime_source, "generated");
+    }
+
+    #[test]
+    fn activate_subscription_remembers_and_restores_last_node() {
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(
+                sample_url_sub("a"),
+                vec![
+                    stored_node("id-a", "a1").node,
+                    stored_node("id-a", "a2").node,
+                ],
+            )
+            .unwrap();
+        store
+            .upsert_subscription(
+                sample_url_sub("b"),
+                vec![
+                    stored_node("id-b", "b1").node,
+                    stored_node("id-b", "b2").node,
+                ],
+            )
+            .unwrap();
+        store.ensure_subscription_enable_policy();
+
+        store.settings.current_node_id = Some("a2".into());
+        store.activate_subscription("id-b").unwrap();
+        assert_eq!(store.settings.current_node_id.as_deref(), Some("b1"));
+        assert_eq!(
+            store.settings.last_node_by_subscription.get("id-a").map(String::as_str),
+            Some("a2")
+        );
+
+        store.settings.current_node_id = Some("b2".into());
+        store.activate_subscription("id-a").unwrap();
+        assert_eq!(store.settings.current_node_id.as_deref(), Some("a2"));
+        assert_eq!(
+            store.settings.last_node_by_subscription.get("id-b").map(String::as_str),
+            Some("b2")
+        );
     }
 }

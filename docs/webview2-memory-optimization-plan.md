@@ -26,7 +26,7 @@
 
 ### 1.2 工具
 
-- **进程级**：PowerShell 按「进程父子链 + `--webview-exe-name`」过滤出属于 satelite-proxy.exe 的 WebView2 进程树，分别记录 WorkingSet 与 PrivatePageCount（`%TEMP%\satelite-mem\proc_mem.ps1`）。
+- **进程级**：PowerShell 按「进程父子链 + `--webview-exe-name`」过滤出属于 satelite-self.exe 的 WebView2 进程树，分别记录 WorkingSet 与 PrivatePageCount（`%TEMP%\satelite-mem\proc_mem.ps1`）。
 - **页面级**：CDP `HeapProfiler.collectGarbage` 强制 GC 后取 `performance.memory` + `Performance.getMetrics`（DOM 节点数、事件监听器数等）（`%TEMP%\satelite-mem\cdp.mjs`）。
 - 页面驱动：因 WebView2 输入管线在窗口非前台时不接受注入事件，采用直调 `__reactProps$.onClick` 的方式遍历导航（脚本已内置）。
 

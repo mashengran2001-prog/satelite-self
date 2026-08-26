@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,54 +110,73 @@ async fn wait_for_refresh(
 }
 
 #[tauri::command]
-pub fn list_subscriptions(state: State<'_, AppState>) -> Result<Vec<SubscriptionView>, String> {
-    state
-        .with_store(|store| Ok(store.subscriptions.iter().map(|s| s.to_view()).collect()))
-        .map_err(|e| e.to_string())
+pub async fn list_subscriptions(app: AppHandle) -> Result<Vec<SubscriptionView>, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| Ok(store.subscriptions.iter().map(|s| s.to_view()).collect()))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list subscriptions task: {e}"))?
 }
 
 #[tauri::command]
-pub fn list_subscription_urls(
-    state: State<'_, AppState>,
-) -> Result<Vec<SubscriptionUrlEntry>, String> {
-    state
-        .with_store(|store| {
-            Ok(store
-                .subscriptions
-                .iter()
-                .filter_map(|subscription| match &subscription.source {
-                    SubscriptionSource::Url { url } => Some(SubscriptionUrlEntry {
-                        id: subscription.id.clone(),
-                        url: url.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect())
-        })
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn get_subscription(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<SubscriptionDetail, String> {
-    state
-        .with_store(|store| {
-            let mut detail = store
-                .get_subscription(&id)
-                .map(|s| s.to_detail())
-                .ok_or_else(|| crate::error::AppError::NotFound(id.clone()))?;
-            if detail.source_kind == "node" {
-                detail.node = store
-                    .nodes
+pub async fn list_subscription_urls(app: AppHandle) -> Result<Vec<SubscriptionUrlEntry>, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| {
+                Ok(store
+                    .subscriptions
                     .iter()
-                    .find(|n| n.subscription_id == id)
-                    .map(|n| node_to_draft(&n.node));
-            }
-            Ok(detail)
-        })
-        .map_err(|e| e.to_string())
+                    .filter_map(|subscription| match &subscription.source {
+                        SubscriptionSource::Url { url } => Some(SubscriptionUrlEntry {
+                            id: subscription.id.clone(),
+                            url: url.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect())
+            })
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|e| format!("list subscription urls task: {e}"))?
+}
+
+#[tauri::command]
+pub async fn get_subscription(app: AppHandle, id: String) -> Result<SubscriptionDetail, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state
+            .with_store(|store| {
+                let mut detail = store
+                    .get_subscription(&id)
+                    .map(|s| s.to_detail())
+                    .ok_or_else(|| crate::error::AppError::NotFound(id.clone()))?;
+                if detail.source_kind == "node" {
+                    detail.node = store
+                        .nodes
+                        .iter()
+                        .find(|n| n.subscription_id == id)
+                        .map(|n| node_to_draft(&n.node));
+                }
+                Ok(detail)
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get subscription task: {e}"))?
 }
 
 #[tauri::command]

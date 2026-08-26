@@ -90,7 +90,7 @@ pub fn set_launch_at_login(enabled: bool) -> AppResult<()> {
         let home = std::env::var_os("HOME").ok_or_else(|| AppError::Core("HOME unset".into()))?;
         let desktop = PathBuf::from(home)
             .join(".config/autostart")
-            .join("satelite-proxy.desktop");
+            .join("satelite-self.desktop");
         if enabled {
             let exe = current_exe()?;
             let body = format!(
@@ -117,7 +117,7 @@ pub fn set_launch_at_login(enabled: bool) -> AppResult<()> {
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "SateliteProxy",
+                "SateliteSelf",
                 "/t",
                 "REG_SZ",
                 "/d",
@@ -139,7 +139,7 @@ pub fn set_launch_at_login(enabled: bool) -> AppResult<()> {
                 "delete",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "SateliteProxy",
+                "SateliteSelf",
                 "/f",
             ]);
             #[cfg(target_os = "windows")]

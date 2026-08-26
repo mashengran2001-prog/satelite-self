@@ -43,6 +43,7 @@ import {
 } from "../ippureSession";
 import { SimpleTrafficSpark } from "../ui/simple/SimpleTrafficSpark";
 import type {
+  AppSettings,
   AutoSelectMode,
   CoreKind,
   GenerateConfigResult,
@@ -266,22 +267,53 @@ function coreDisplayName(kind: string | null | undefined): string {
   return kind === "xray" ? "Xray" : kind === "mihomo" ? "mihomo" : "sing-box";
 }
 
-/** Full reload (actions after start/stop/etc). */
+  /** Details wave: subscriptions, nodes, active-core version, LAN IP. */
+  const loadDetails = useCallback(
+    async (settings: AppSettings, status: ProxyStatus | null) => {
+      try {
+        const activeKind =
+          (status?.core_type ?? settings.core_type ?? "singbox") as CoreKind;
+        const [subList, nodeList, coreInfo, lan] = await Promise.all([
+          listSubscriptions(),
+          listAllNodes(),
+          getCoreInfo(activeKind).catch(() => null),
+          getLanIp().catch(() => null),
+        ]);
+        setSubs(subList);
+        setNodes(nodeList);
+        setLanIp(lan ?? null);
+        const cur =
+          nodeList.find((n) => n.id === settings.current_node_id) ??
+          nodeList[0] ??
+          null;
+        setCurrentNode(cur);
+        // Version card shows the ACTIVE core's name + version (core_type
+        // reports the actually running kind; while stopped it falls back to
+        // the setting).
+        if (coreInfo?.installed) {
+          const ver = (coreInfo.version ?? "ok").replace(/^v/, "");
+          setCoreVersion(`${coreInfo.name} ${ver}`.trim());
+        } else {
+          setCoreVersion(null);
+        }
+        setDetailsReady(true);
+      } catch (e) {
+        setError(typeof e === "string" ? e : String(e));
+        setDetailsReady(true);
+      }
+    },
+    [],
+  );
+
+  /** Full reload: status lands first, details fill in the background. */
   const reload = useCallback(async () => {
     setError(null);
     try {
-      // Kick both waves at once; commit status as soon as wave 1 resolves.
+      // Status wave only — details are fired in the background so start/stop
+      // actions never wait on large node/subscription listings.
       const statusP = Promise.all([
         getSettings(),
         getProxyStatus().catch(() => null),
-      ]);
-      const detailP = Promise.all([
-        listSubscriptions(),
-        listAllNodes(),
-        getCoreInfo("singbox").catch(() => null),
-        getCoreInfo("xray").catch(() => null),
-        getCoreInfo("mihomo").catch(() => null),
-        getLanIp().catch(() => null),
       ]);
 
       const [settings, status] = await statusP;
@@ -295,39 +327,13 @@ function coreDisplayName(kind: string | null | undefined): string {
       setProxy(status);
       pushSpark(status);
       setStatusReady(true);
-
-      const [subList, nodeList, coreSingbox, coreXray, coreMihomo, lan] =
-        await detailP;
-      setSubs(subList);
-      setNodes(nodeList);
-      setLanIp(lan ?? null);
-      const cur =
-        nodeList.find((n) => n.id === settings.current_node_id) ??
-        nodeList[0] ??
-        null;
-      setCurrentNode(cur);
-      // Version card shows the ACTIVE core's name + version (core_type reports
-      // the actually running kind; while stopped it falls back to the setting).
-      const activeKind = status?.core_type ?? settings.core_type ?? "singbox";
-      const core =
-        activeKind === "xray"
-          ? coreXray
-          : activeKind === "mihomo"
-            ? coreMihomo
-            : coreSingbox;
-      if (core?.installed) {
-        const ver = (core.version ?? "ok").replace(/^v/, "");
-        setCoreVersion(`${core.name} ${ver}`.trim());
-      } else {
-        setCoreVersion(null);
-      }
-      setDetailsReady(true);
+      void loadDetails(settings, status);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
       setStatusReady(true);
       setDetailsReady(true);
     }
-  }, [pushSpark, t]);
+  }, [loadDetails, pushSpark]);
 
   useEffect(() => {
     void reload();
@@ -457,7 +463,8 @@ function coreDisplayName(kind: string | null | undefined): string {
     try {
       const s = await startProxy(false);
       setProxy(s);
-      await reload();
+      setStatusReady(true);
+      void reload();
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {

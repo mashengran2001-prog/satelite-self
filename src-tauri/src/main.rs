@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    satelite_proxy_lib::run()
+    satelite_self_lib::run()
 }

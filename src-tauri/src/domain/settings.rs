@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Clash-style outbound routing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -187,6 +188,10 @@ pub struct AppSettings {
     /// Last selected node id (ProxyNode.id)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_node_id: Option<String>,
+    /// Last node id remembered per subscription (subscription id → node id).
+    /// Restored when the user switches back to that subscription.
+    #[serde(default)]
+    pub last_node_by_subscription: BTreeMap<String, String>,
     /// Secret written into last generated config (for future clash_api client)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_api_secret: Option<String>,
@@ -404,6 +409,7 @@ impl Default for AppSettings {
             api_port: 19090,
             extra_inbounds: Vec::new(),
             current_node_id: None,
+            last_node_by_subscription: BTreeMap::new(),
             clash_api_secret: None,
             probe_url: default_probe_url(),
             mix_mode: false,

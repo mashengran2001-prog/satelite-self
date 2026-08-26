@@ -4,10 +4,18 @@ use crate::state::AppState;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
-pub fn get_proxy_status(app: AppHandle, state: State<'_, AppState>) -> Result<ProxyStatus, String> {
-    let status = state.proxy_status().map_err(|e| e.to_string())?;
+pub async fn get_proxy_status(app: AppHandle) -> Result<ProxyStatus, String> {
+    let worker_app = app.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        state.proxy_status().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("proxy status task: {e}"))?;
     AppState::schedule_kernel_selection_sync(app);
-    Ok(status)
+    status
 }
 
 #[tauri::command]
