@@ -595,14 +595,15 @@ export function NodesPage() {
             ]}
           />
 
-          {viewMode === "grid" && (
-            <GlassSeg
-              value={String(columnCount)}
-              ariaLabel="网格列数"
-              onChange={(v) => setColumnCount(Number(v) as GridColumnCount)}
-              options={GRID_COLUMN_OPTIONS}
-            />
-          )}
+          <GlassSeg
+            value={String(columnCount)}
+            ariaLabel="网格列数"
+            onChange={(v) => {
+              setColumnCount(Number(v) as GridColumnCount);
+              if (viewMode !== "grid") setViewMode("grid");
+            }}
+            options={GRID_COLUMN_OPTIONS}
+          />
         </div>
       </header>
 
