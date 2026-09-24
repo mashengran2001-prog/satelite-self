@@ -668,6 +668,40 @@ impl Runtime {
         store: &mut AppStore,
         enable_system_proxy: bool,
     ) -> AppResult<ProxyStatus> {
+        let retry_tun_conflict = cfg!(target_os = "windows")
+            && store.settings.tun_enabled
+            && !store.settings.runtime_source().is_custom();
+        match self.start_proxy_once(
+            app_data_dir,
+            resource_dir,
+            store,
+            enable_system_proxy,
+        ) {
+            Ok(status) => Ok(status),
+            Err(error) if retry_tun_conflict && is_tun_adapter_conflict(&error) => {
+                crate::app_log::warn(
+                    "core",
+                    "TUN adapter conflict detected; rebuilding config with a new session adapter and retrying once",
+                );
+                std::thread::sleep(Duration::from_millis(250));
+                self.start_proxy_once(
+                    app_data_dir,
+                    resource_dir,
+                    store,
+                    enable_system_proxy,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn start_proxy_once(
+        &mut self,
+        app_data_dir: &Path,
+        resource_dir: Option<&Path>,
+        store: &mut AppStore,
+        enable_system_proxy: bool,
+    ) -> AppResult<ProxyStatus> {
         self.core.poll();
         if self.core.is_running() {
             return Ok(self.status(store));
@@ -1517,6 +1551,12 @@ fn ensure_listen_port_available(port: u16, label: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn is_tun_adapter_conflict(error: &AppError) -> bool {
+    let lower = error.to_string().to_ascii_lowercase();
+    lower.contains("create adapter: cannot create a file when that file already exists")
+        || (lower.contains("create adapter") && lower.contains("open existing adapter"))
+}
+
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.
 fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
@@ -1977,7 +2017,8 @@ mod tests {
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tun_name_tests {
-    use super::next_windows_tun_interface_name;
+    use super::{is_tun_adapter_conflict, next_windows_tun_interface_name};
+    use crate::error::AppError;
 
     #[test]
     fn each_tun_start_gets_a_short_unique_adapter_name() {
@@ -1990,6 +2031,17 @@ mod windows_tun_name_tests {
         assert!(second.starts_with("satelite-"));
         assert!(first.len() <= 48, "adapter name is too long: {first}");
         assert!(second.len() <= 48, "adapter name is too long: {second}");
+    }
+
+    #[test]
+    fn adapter_collision_is_eligible_for_one_retry() {
+        let error = AppError::Core(
+            "configure tun interface: (create adapter: Cannot create a file when that file already exists. | open existing adapter: Element not found.)".into(),
+        );
+        assert!(is_tun_adapter_conflict(&error));
+        assert!(!is_tun_adapter_conflict(&AppError::Core(
+            "configure tun interface: Access is denied".into(),
+        )));
     }
 }
 

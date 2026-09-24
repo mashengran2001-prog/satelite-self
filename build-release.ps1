@@ -1,8 +1,16 @@
-# Satelite 1.1.3 Release Build Script
+# Satelite 1.1.4 Release Build Script
 # Run this in a normal PowerShell terminal (outside Claude Code) to avoid session timeout issues.
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+$defaultSigningKey = Join-Path $HOME ".satelite-updater\satelite.key"
+if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and (Test-Path $defaultSigningKey)) {
+    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $defaultSigningKey -Raw
+    if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    }
+}
 
 Write-Host "Step 1/4: Building frontend..." -ForegroundColor Cyan
 corepack pnpm run build
@@ -32,7 +40,12 @@ foreach ($s in $sets) {
     $out = Join-Path $ruleDir $s.Name
     Write-Host "  Downloading $($s.Name)..."
     Invoke-WebRequest -Uri $s.Url -OutFile $out -UseBasicParsing
-    $magic = [System.Text.Encoding]::ASCII.GetString((Get-Content $out -AsByteStream -TotalCount 3))
+    $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $out).Path)
+    $magic = if ($bytes.Length -ge 3) {
+        [System.Text.Encoding]::ASCII.GetString($bytes, 0, 3)
+    } else {
+        ""
+    }
     if ($magic -ne "SRS") { throw "$($s.Name) is not a binary SRS (bad URL or HTML error page)" }
 }
 
@@ -42,8 +55,8 @@ corepack pnpm exec tauri build --bundles nsis --config src-tauri/tauri.singbox-w
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`nBuild complete!" -ForegroundColor Green
-    Write-Host "Installer: src-tauri\target\release\bundle\nsis\Satelite_1.1.3_x64-setup.exe"
-    Write-Host "Signature: src-tauri\target\release\bundle\nsis\Satelite_1.1.3_x64-setup.exe.sig"
+    Write-Host "Installer: src-tauri\target\release\bundle\nsis\Satelite_1.1.4_x64-setup.exe"
+    Write-Host "Signature: src-tauri\target\release\bundle\nsis\Satelite_1.1.4_x64-setup.exe.sig"
 } else {
     throw "Tauri build failed with exit code $LASTEXITCODE"
 }
