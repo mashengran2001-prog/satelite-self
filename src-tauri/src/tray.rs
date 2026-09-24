@@ -7,9 +7,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime as TauriRuntime,
+    AppHandle, Emitter, Manager, Runtime as TauriRuntime,
 };
 
 /// Same shell line as Dashboard “复制环境变量”.
@@ -162,18 +162,46 @@ pub fn refresh_icon<R: TauriRuntime>(app: &AppHandle<R>) {
     let _ = tray.set_icon_with_as_template(Some(icon), as_template);
 }
 
-pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
+/// Build the tray menu. The pin item is a check item seeded from the store, so
+/// tray and in-app button always agree.
+fn build_menu<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let pinned = app
+        .try_state::<AppState>()
+        .map(|s| s.always_on_top())
+        .unwrap_or(false);
+
     let show_i = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
+    let pin_i = CheckMenuItem::with_id(app, "pin", "窗口置顶", true, pinned, None::<&str>)?;
     let start_i = MenuItem::with_id(app, "start", "启动代理", true, None::<&str>)?;
     let stop_i = MenuItem::with_id(app, "stop", "停止代理", true, None::<&str>)?;
     let copy_env_i = MenuItem::with_id(app, "copy_env", "复制环境变量", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
+    Menu::with_items(
         app,
-        &[&show_i, &sep, &start_i, &stop_i, &copy_env_i, &sep, &quit_i],
-    )?;
+        &[
+            &show_i, &pin_i, &sep, &start_i, &stop_i, &copy_env_i, &sep, &quit_i,
+        ],
+    )
+}
+
+/// Rebuild the tray menu so the pin check mark matches the store.
+/// Called after the in-app button toggles the setting.
+pub fn refresh_menu<R: TauriRuntime>(app: &AppHandle<R>) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match build_menu(app) {
+        Ok(menu) => {
+            let _ = tray.set_menu(Some(menu));
+        }
+        Err(e) => eprintln!("[satelite] rebuild tray menu failed: {e}"),
+    }
+}
+
+pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let menu = build_menu(app)?;
 
     // Prefer app icon; fall back to default tray without custom image if load fails.
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -200,6 +228,28 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         let _ = state.stop_proxy();
                     }
                     refresh_icon(&handle);
+                });
+            }
+            "pin" => {
+                // Flip the window first so the click feels instant, then persist.
+                // with_store_mut clones the whole store (~400KB with a large
+                // subscription) and writes it, which is too slow to run inline
+                // on the menu thread.
+                let next = !app
+                    .try_state::<AppState>()
+                    .map(|s| s.always_on_top())
+                    .unwrap_or(false);
+                window_ctrl::apply_always_on_top(app, next);
+                let _ = app.emit("always-on-top-changed", next);
+
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        let _ = state.with_store_mut(|store| {
+                            store.settings.always_on_top = next;
+                            Ok(())
+                        });
+                    }
                 });
             }
             "copy_env" => {

@@ -96,6 +96,7 @@ pub fn update_settings(
     glow_color: Option<String>,
     hero_style: Option<String>,
     glass_frost: Option<bool>,
+    always_on_top: Option<bool>,
     tray_icon: Option<String>,
     unload_ui_on_tray: Option<bool>,
     smart_switch: Option<bool>,
@@ -111,6 +112,7 @@ pub fn update_settings(
     let mut route_final_changed = false;
     let mut find_process_changed = false;
     let mut bypass_lan_changed = false;
+    let mut always_on_top_changed: Option<bool> = None;
     let settings = state
         .with_store_mut(|store| {
             if let Some(p) = mixed_port {
@@ -250,6 +252,12 @@ pub fn update_settings(
             if let Some(v) = glass_frost {
                 store.settings.glass_frost = v;
             }
+            if let Some(v) = always_on_top {
+                if store.settings.always_on_top != v {
+                    always_on_top_changed = Some(v);
+                }
+                store.settings.always_on_top = v;
+            }
             if let Some(raw) = tray_icon {
                 if let Some(style) = crate::domain::TrayIconStyle::parse(&raw) {
                     store.settings.tray_icon = style;
@@ -324,6 +332,10 @@ pub fn update_settings(
     if let Some(enabled) = launch_changed {
         crate::autostart::set_launch_at_login(enabled).map_err(|e| e.to_string())?;
     }
+    if let Some(on) = always_on_top_changed {
+        crate::window_ctrl::apply_always_on_top(&app, on);
+        crate::tray::refresh_menu(&app);
+    }
     crate::tray::refresh_icon(&app);
 
     // route.final must restart: sing-box Clash PUT /configs often returns OK without
@@ -350,7 +362,7 @@ pub async fn set_current_node(app: AppHandle, node_id: String) -> Result<AppSett
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
         let (settings, was_kernel, _) = state
-            .select_current_node_serialized(&node_id, true, true)
+            .select_current_node_serialized(&worker_app, &node_id, true, true)
             .map_err(|e| e.to_string())?;
         if was_kernel {
             crate::rule_apply::request_restart(worker_app.clone(), Vec::new());

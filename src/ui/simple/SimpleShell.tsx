@@ -11,6 +11,7 @@ import {
 import { useImportIntent } from "../../ImportIntentContext";
 import { useI18n } from "../../i18n";
 import type { MessageKey } from "../../i18n";
+import { PinButton } from "../../components/PinButton";
 import { UiModeMenu } from "../UiModeMenu";
 import { SimpleConnectPage } from "./SimpleConnectPage";
 
@@ -127,6 +128,9 @@ export function SimpleShell() {
           </nav>
           <div className="topnav-tools simple-topnav-tools">
             <UiModeMenu />
+            {/* Window control, so it sits last — nearest the native minimise
+                button. Same ordering as the pro shell's TopNav. */}
+            <PinButton />
           </div>
         </div>
       </header>

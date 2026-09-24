@@ -271,7 +271,7 @@ pub fn spawn(app: AppHandle) {
                     tokio::time::sleep(TICK).await;
                     continue;
                 }
-                if let Err(e) = tick(&state).await {
+                if let Err(e) = tick(&app, &state).await {
                     app_log::warn("smart_switch", format!("tick: {e}"));
                 }
                 if let Err(e) = tick_smart_rules(&state).await {
@@ -285,7 +285,7 @@ pub fn spawn(app: AppHandle) {
 
 /// User just enabled smart switch: probe candidates and pick the best node once.
 /// Bypasses passive trigger / hysteresis (still respects circuit-breaker ejection).
-pub async fn select_best_now(state: &AppState) -> Result<SmartSwitchNowResult, String> {
+pub async fn select_best_now(app: &AppHandle, state: &AppState) -> Result<SmartSwitchNowResult, String> {
     app_log::info("smart_switch", "bootstrap probe started");
 
     if !state.is_core_running() {
@@ -533,7 +533,7 @@ pub async fn select_best_now(state: &AppState) -> Result<SmartSwitchNowResult, S
         });
     }
 
-    apply_switch(state, &best_id, false)?;
+    apply_switch(app, state, &best_id, false)?;
     {
         let mut c = ctrl();
         c.mark_switched();
@@ -563,7 +563,7 @@ pub async fn select_best_now(state: &AppState) -> Result<SmartSwitchNowResult, S
 }
 
 /// Hot-select first; only then persist current_node_id (avoids half-applied state).
-fn apply_switch(state: &AppState, best_id: &str, hard_fail: bool) -> Result<(), String> {
+fn apply_switch(app: &AppHandle, state: &AppState, best_id: &str, hard_fail: bool) -> Result<(), String> {
     let (tag, name) = {
         let store = state.lock_store();
         let node = store
@@ -572,7 +572,7 @@ fn apply_switch(state: &AppState, best_id: &str, hard_fail: bool) -> Result<(), 
         (outbound_tag(node), node.name.clone())
     };
 
-    match state.select_current_node_serialized(best_id, false, hard_fail) {
+    match state.select_current_node_serialized(app, best_id, false, hard_fail) {
         Ok((_, _, true)) => {}
         Ok((_, _, false)) => return Err("core not running".into()),
         Err(e) => {
@@ -591,7 +591,7 @@ fn apply_switch(state: &AppState, best_id: &str, hard_fail: bool) -> Result<(), 
     Ok(())
 }
 
-async fn tick(state: &AppState) -> Result<(), String> {
+async fn tick(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let (enabled, custom) = state
         .with_store(|s| {
             Ok((
@@ -904,7 +904,7 @@ async fn tick(state: &AppState) -> Result<(), String> {
             .unwrap_or_else(|| best_id.clone())
     };
 
-    apply_switch(state, &best_id, hard_fail)?;
+    apply_switch(app, state, &best_id, hard_fail)?;
 
     {
         let mut c = ctrl();

@@ -11,6 +11,8 @@ use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 /// Matches frontend `windowLayout.ts` (logical px).
 const PRO_SIZE: (f64, f64) = (960.0, 720.0);
+const PRO_MIN: (f64, f64) = (800.0, 600.0);
+const PRO_MAX: (f64, f64) = (1280.0, 960.0);
 const SIMPLE_SIZE: (f64, f64) = (420.0, 720.0);
 /// Simple mode lets the user shrink the window; content scrolls below this.
 const SIMPLE_MIN: (f64, f64) = (320.0, 480.0);
@@ -67,6 +69,26 @@ pub fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_visible<R: Runtime>(_app: &AppHandle<R>, _visible: bool) {}
 
+/// Read the persisted pin preference (false when state/store is unavailable).
+fn pin_pref<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<AppState>()
+        .map(|s| s.always_on_top())
+        .unwrap_or(false)
+}
+
+/// Apply "keep above other windows" to the live main window.
+///
+/// Called from `update_settings` (user toggled it) and from `show_main` — a
+/// WebView recreated after tray unload starts without the flag, so the pin
+/// would silently drop on every tray round-trip if we didn't re-apply it.
+pub fn apply_always_on_top<R: Runtime>(app: &AppHandle<R>, on: bool) {
+    if let Some(w) = app.get_webview_window("main") {
+        if let Err(e) = w.set_always_on_top(on) {
+            eprintln!("[satelite] set_always_on_top({on}) failed: {e}");
+        }
+    }
+}
+
 /// Show main UI; recreate WebView if it was destroyed on tray.
 ///
 /// Called from tray menu/click and from macOS Dock reopen (`RunEvent::Reopen`).
@@ -85,6 +107,7 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
+            let _ = w.set_always_on_top(pin_pref(app));
         } else {
             let _ = w.destroy();
         }
@@ -101,18 +124,26 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
             .title("Satelite")
             .inner_size(w, h)
             .fullscreen(false)
+            // Set the pin on the builder rather than after build() so a pinned
+            // window never flashes behind other windows while it comes up.
+            .always_on_top(pin_pref(app))
             // Important on macOS: without activation policy / visible, Dock reopen
             // can recreate a window that never becomes key.
             .visible(true)
             .focused(true);
-        // Simple mode: user-resizable strip, shrink-only (frontend restores size).
+        // Both modes are now resizable to accommodate varied display sizes.
+        // Simple mode: vertical strip, shrink-only (the window restores its own size).
+        // Pro mode: allow modest growth for wide displays or multi-monitor setups.
         let builder = if mode == "simple" {
             builder
                 .resizable(true)
                 .min_inner_size(SIMPLE_MIN.0, SIMPLE_MIN.1)
                 .max_inner_size(SIMPLE_MAX.0, SIMPLE_MAX.1)
         } else {
-            builder.resizable(false)
+            builder
+                .resizable(true)
+                .min_inner_size(PRO_MIN.0, PRO_MIN.1)
+                .max_inner_size(PRO_MAX.0, PRO_MAX.1)
         };
         match builder.build() {
             Ok(win) => {

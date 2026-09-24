@@ -35,7 +35,7 @@ function loadIppureCache(): Map<string, IppureResult> {
 /** Persisted IPPure results shared by the nodes pages and the overview. */
 const ippureCache = loadIppureCache();
 
-function persistCache() {
+function writeCacheNow() {
   try {
     const entries = Array.from(ippureCache.values())
       .sort((a, b) => b.tested_at - a.tested_at)
@@ -44,6 +44,37 @@ function persistCache() {
   } catch {
     /* keep the module-level map as the fallback for this session */
   }
+}
+
+/**
+ * Coalesce writes.
+ *
+ * A purity batch streams one result per node, and each one used to serialize
+ * the entire cache (up to 3000 entries) synchronously on the main thread — a
+ * 200-node run meant 200 full stringify + localStorage writes, which is enough
+ * to make the rows visibly stutter as they land. The map is updated
+ * immediately, so reads never see stale data; only the disk write is deferred.
+ */
+const PERSIST_DEBOUNCE_MS = 400;
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+
+function persistCache() {
+  if (persistTimer !== undefined) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    writeCacheNow();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+// A debounced write would be lost if the window closes mid-batch.
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    if (persistTimer !== undefined) {
+      clearTimeout(persistTimer);
+      persistTimer = undefined;
+      writeCacheNow();
+    }
+  });
 }
 
 /** Seed a page's state with the persisted cache without a loading flash. */

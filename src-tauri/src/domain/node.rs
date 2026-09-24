@@ -514,6 +514,7 @@ pub enum SubscriptionFormat {
     Base64UriList,
     SingboxJson,
     XrayJson,
+    V2raynJson,
     Manual,
 }
 

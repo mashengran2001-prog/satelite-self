@@ -6,6 +6,7 @@ import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { useI18n } from "../i18n";
 import type { MessageKey } from "../i18n/messages";
 import type { NavKey } from "../types";
+import { PinButton } from "./PinButton";
 import { ThemeSwitch } from "./ThemeSwitch";
 import { UiModeMenu } from "../ui/UiModeMenu";
 
@@ -148,6 +149,10 @@ export function TopNav({ active, onChange }: Props) {
             <span className="topnav-status-text">{stateLabel}</span>
           </div>
           <UiModeMenu />
+          {/* Last in the group on purpose: this is a *window* control, not an
+              app control, so it sits at the right edge — the closest the page
+              can get to the native minimise button above it. */}
+          <PinButton />
         </div>
       </div>
     </header>

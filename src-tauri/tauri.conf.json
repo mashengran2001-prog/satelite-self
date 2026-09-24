@@ -15,7 +15,9 @@
         "title": "Satelite",
         "width": 960,
         "height": 720,
-        "resizable": false,
+        "resizable": true,
+        "minWidth": 720,
+        "minHeight": 560,
         "center": true
       }
     ],
@@ -26,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,6 +55,15 @@
     "deep-link": {
       "desktop": {
         "schemes": ["clash", "sing-box", "singbox"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBMkIzRkM5RThBRkRGRjcKUldUMzM2L295VDhyYXZ1emVxR2FKNWp3S0htMTNNNlZsTlZ2RkdLTUpsOTdhb2ljSEIwMy9nV1IK",
+      "endpoints": [
+        "https://github.com/mashengran2001-prog/satelite-self/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

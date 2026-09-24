@@ -277,6 +277,12 @@ pub struct AppSettings {
     /// available for low-end GPUs.
     #[serde(default = "default_glass_frost")]
     pub glass_frost: bool,
+    /// Keep the main window above other windows. Mainly for the simple strip:
+    /// pin the 420px column next to a browser and switch nodes without
+    /// raising the window every time. Applied on launch and after every
+    /// WebView recreate (see `windowLayout.ts`).
+    #[serde(default)]
+    pub always_on_top: bool,
     /// Menu-bar / tray mark: badge | mark | ghost | buddy.
     #[serde(default)]
     pub tray_icon: TrayIconStyle,
@@ -432,6 +438,7 @@ impl Default for AppSettings {
             glow_color: default_glow_color(),
             hero_style: default_hero_style(),
             glass_frost: default_glass_frost(),
+            always_on_top: false,
             tray_icon: TrayIconStyle::default(),
             unload_ui_on_tray: default_unload_ui_on_tray(),
             auto_select: AutoSelectMode::Off,
@@ -505,6 +512,28 @@ mod tests {
         settings.migrate_capture_mode();
         assert_eq!(settings.capture_mode, CaptureMode::System);
         assert!(!settings.tun_enabled);
+    }
+
+    #[test]
+    fn always_on_top_defaults_off_and_survives_roundtrip() {
+        assert!(!AppSettings::default().always_on_top);
+
+        let pinned = AppSettings {
+            always_on_top: true,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&pinned).expect("serialize");
+        let back: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.always_on_top);
+    }
+
+    #[test]
+    fn settings_without_always_on_top_still_load() {
+        // Stores written before the pin feature have no such key — loading them
+        // must not fail, or an upgrade wipes the user's settings.
+        let legacy = r#"{"mixed_port":2080,"api_port":19090}"#;
+        let settings: AppSettings = serde_json::from_str(legacy).expect("legacy load");
+        assert!(!settings.always_on_top);
     }
 
     #[test]

@@ -761,15 +761,23 @@ impl Runtime {
         self.last_binary_path = Some(bin.clone());
 
         let api = ClashApi::new("127.0.0.1", store.settings.api_port, &secret);
-        // TUN start can take a few seconds (utun + routes). Health uses a short
-        // per-try timeout so we do not block the runtime lock for minutes.
+        // `start_with_ports` already waited for the mixed port to bind and
+        // confirmed the process is alive, so traffic is being forwarded by the
+        // time we get here. This wait is only for clash_api (stats, connection
+        // list, hot node switch) — it is *not* a liveness gate.
+        //
+        // Budget: measured sing-box start is ~0.25s without TUN and 4-5s with
+        // it; a slow wintun/utun adapter can exceed 10s (sing-box logs "open
+        // interface take too much time to finish!" at the 10s mark). The old
+        // 10s TUN budget therefore expired mid-startup on slow adapters.
         let max_wait = if elevated {
-            Duration::from_secs(10)
+            Duration::from_secs(30)
         } else {
             Duration::from_secs(6)
         };
         let wait_started = Instant::now();
         let mut ok = false;
+        let mut core_died = false;
         while wait_started.elapsed() < max_wait {
             if api.health_ok() {
                 ok = true;
@@ -778,10 +786,25 @@ impl Runtime {
             std::thread::sleep(std::time::Duration::from_millis(200));
             self.core.poll();
             if !self.core.is_running() {
+                core_died = true;
                 break;
             }
         }
-        if !ok {
+        // Only a dead core is a startup failure. A live core whose clash_api is
+        // still coming up must not be killed: proxying works without it, and
+        // tearing it down here is what produced "配置已保存，但应用到内核失败"
+        // while the proxy was in fact already serving traffic.
+        if !ok && !core_died {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "sing-box is running but clash_api did not answer within {}s at 127.0.0.1:{} — keeping the core; stats and connection list stay empty until it responds",
+                    max_wait.as_secs(),
+                    store.settings.api_port
+                ),
+            );
+        }
+        if core_died {
             let log_hint = self
                 .core
                 .last_error()
@@ -809,20 +832,17 @@ impl Runtime {
                         })
                 })
                 .unwrap_or_default();
+            // Reap the corpse so run_mode / state are consistent for the retry.
             let _ = self.core.stop();
             let detail = if log_hint.is_empty() {
-                format!(
-                    "sing-box started but clash_api not responding at 127.0.0.1:{}",
-                    store.settings.api_port
-                )
+                "sing-box exited during startup".to_string()
             } else {
-                format!(
-                    "sing-box started but clash_api not responding at 127.0.0.1:{}\n--- log ---\n{log_hint}",
-                    store.settings.api_port
-                )
+                format!("sing-box exited during startup\n--- log ---\n{log_hint}")
             };
             return Err(AppError::Core(detail));
         }
+        // Set the client even when it never answered: every call retries, so the
+        // stats and connection views recover on their own once it comes up.
         self.api = Some(api);
         self.core_started_at = Some(now_unix_secs());
 
@@ -910,11 +930,15 @@ impl Runtime {
             crate::core::ensure_wintun(app_data_dir, resource_dir, None)?;
         }
 
-        let mut xray_opts = build_options(store, String::new());
+        let xray_opts = build_options(store, String::new());
         #[cfg(target_os = "macos")]
-        if store.settings.tun_enabled {
-            xray_opts.tun_interface_name = Some(pick_free_darwin_utun_name());
-        }
+        let xray_opts = {
+            let mut xray_opts = xray_opts;
+            if store.settings.tun_enabled {
+                xray_opts.tun_interface_name = Some(pick_free_darwin_utun_name());
+            }
+            xray_opts
+        };
         let built = build_xray_config(&nodes, &xray_opts)?;
         let config_path = write_active_config(app_data_dir, &built)?;
         // The generator falls back to the first supported node when the
@@ -1116,13 +1140,17 @@ impl Runtime {
         self.last_binary_path = Some(bin.clone());
 
         let api = ClashApi::new("127.0.0.1", store.settings.api_port, &secret);
+        // Same contract as the sing-box path: the port is already bound and the
+        // process confirmed alive by `start_with_ports`, so this only waits for
+        // the Clash API. TUN needs headroom for slow wintun/utun adapters.
         let max_wait = if elevated {
-            Duration::from_secs(10)
+            Duration::from_secs(30)
         } else {
             Duration::from_secs(6)
         };
         let wait_started = Instant::now();
         let mut ok = false;
+        let mut core_died = false;
         while wait_started.elapsed() < max_wait {
             if api.health_ok() {
                 ok = true;
@@ -1131,10 +1159,21 @@ impl Runtime {
             std::thread::sleep(std::time::Duration::from_millis(200));
             self.core.poll();
             if !self.core.is_running() {
+                core_died = true;
                 break;
             }
         }
-        if !ok {
+        if !ok && !core_died {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "mihomo is running but its Clash API did not answer within {}s at 127.0.0.1:{} — keeping the core; stats and connection list stay empty until it responds",
+                    max_wait.as_secs(),
+                    store.settings.api_port
+                ),
+            );
+        }
+        if core_died {
             let log_hint = self
                 .core
                 .last_error()
@@ -1164,15 +1203,9 @@ impl Runtime {
                 .unwrap_or_default();
             let _ = self.core.stop();
             let detail = if log_hint.is_empty() {
-                format!(
-                    "mihomo started but clash api not responding at 127.0.0.1:{}",
-                    store.settings.api_port
-                )
+                "mihomo exited during startup".to_string()
             } else {
-                format!(
-                    "mihomo started but clash api not responding at 127.0.0.1:{}\n--- log ---\n{log_hint}",
-                    store.settings.api_port
-                )
+                format!("mihomo exited during startup\n--- log ---\n{log_hint}")
             };
             return Err(AppError::Core(detail));
         }
@@ -1244,13 +1277,18 @@ impl Runtime {
             let port = insight.clash_api_port.unwrap_or(9090);
             let secret = insight.clash_api_secret.clone().unwrap_or_default();
             let api = ClashApi::new(host, port, &secret);
+            // Custom profile: the user owns the config, so clash_api may be
+            // configured on a different host/port — or the profile may be slow
+            // to bring it up. Same rule as the generated paths: only a dead
+            // core fails the start.
             let max_wait = if elevated {
-                Duration::from_secs(10)
+                Duration::from_secs(30)
             } else {
                 Duration::from_secs(6)
             };
             let wait_started = Instant::now();
             let mut ok = false;
+            let mut core_died = false;
             while wait_started.elapsed() < max_wait {
                 if api.health_ok() {
                     ok = true;
@@ -1259,14 +1297,24 @@ impl Runtime {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 self.core.poll();
                 if !self.core.is_running() {
+                    core_died = true;
                     break;
                 }
             }
-            if !ok {
+            if core_died {
                 let _ = self.core.stop();
-                return Err(AppError::Core(format!(
-                    "sing-box started but clash_api not responding at {host}:{port}"
-                )));
+                return Err(AppError::Core(
+                    "sing-box exited during startup (custom profile)".to_string(),
+                ));
+            }
+            if !ok {
+                crate::app_log::warn(
+                    "core",
+                    format!(
+                        "custom sing-box profile is running but clash_api did not answer within {}s at {host}:{port} — keeping the core; check the profile's external_controller",
+                        max_wait.as_secs()
+                    ),
+                );
             }
             self.api = Some(api);
             store.settings.clash_api_secret = if secret.is_empty() {
@@ -1488,7 +1536,14 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         tun_ipv6: store.settings.tun_ipv6_enabled,
         block_quic: store.settings.block_quic,
         bypass_lan: store.settings.bypass_lan,
-        tun_interface_name: None,
+        tun_interface_name: if cfg!(target_os = "windows") && store.settings.tun_enabled {
+            // sing-box's default Wintun name can be left in a half-created
+            // state after an older process is killed. A product-specific name
+            // avoids that stale adapter and remains stable across restarts.
+            Some("satelite-self".into())
+        } else {
+            None
+        },
     }
 }
 

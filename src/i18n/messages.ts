@@ -4,6 +4,8 @@ export type Locale = "zh" | "en";
 const en = {
   // common
   "common.loading": "Loading…",
+  "common.pinWindow": "Keep window on top",
+  "common.unpinWindow": "Stop keeping on top",
   "common.save": "Save",
   "common.saving": "Saving…",
   "common.cancel": "Cancel",
@@ -314,6 +316,9 @@ const en = {
   "settings.appLatest": "Latest release",
   "settings.appUpToDate": "up to date",
   "settings.appAhead": "local build is newer",
+  "settings.appInstallUpdate": "Update now",
+  "settings.appInstalling": "Installing…",
+  "settings.appRelaunching": "Restarting…",
   "settings.appTagline": "sing-box desktop proxy",
   "settings.appCheckedLabel": "Last check",
   "settings.appPlatformLabel": "Platform",
@@ -435,6 +440,21 @@ const en = {
   "nodes.ippureErrorStatus": "HTTP status error",
   "nodes.ippureCustomUnsupported":
     "Custom sing-box mode does not support IP purity checks",
+  // Batch verdicts. Shown once above the rows when every node failed, so the
+  // user can tell "my nodes are dead" from "the probe service is unreachable"
+  // instead of reading a wall of identical red rows.
+  "nodes.ippureDiagNodesFailed":
+    "Every node failed, but the purity service is reachable over your current connection — the tested nodes are the problem.",
+  "nodes.ippureDiagEndpointUnreachable":
+    "The purity service could not be reached over your current connection either, so these results say nothing about your nodes. Check your network, then retry.",
+  "nodes.ippureDiagEndpointRejecting":
+    "The purity service refused every request (blocked or rate limited). Wait a while and retry.",
+  "nodes.ippureDiagConfigStale":
+    "None of these nodes exist in the running core. Restart the proxy to apply the latest config, then retry.",
+  "nodes.ippureDiagAllFailed":
+    "Every node failed for mixed reasons. Hover a row to see its cause.",
+  "nodes.ippureEndpointWarning":
+    "The purity service looks unreachable right now — this batch will probably fail on every node. You can stop it and retry later.",
   "nodes.ippureRiskWhite": "White",
   "nodes.ippureRiskGreen": "Green",
   "nodes.ippureRiskYellow": "Yellow",
@@ -809,6 +829,8 @@ export type MessageKey = keyof typeof en;
 
 const zh: Record<MessageKey, string> = {
   "common.loading": "加载中…",
+  "common.pinWindow": "窗口置顶",
+  "common.unpinWindow": "取消置顶",
   "common.save": "保存",
   "common.saving": "保存中…",
   "common.cancel": "取消",
@@ -1106,6 +1128,9 @@ const zh: Record<MessageKey, string> = {
   "settings.appLatest": "最新版本",
   "settings.appUpToDate": "已是最新",
   "settings.appAhead": "本地版本较新",
+  "settings.appInstallUpdate": "立即更新",
+  "settings.appInstalling": "正在安装…",
+  "settings.appRelaunching": "正在重启…",
   "settings.appTagline": "基于 sing-box 的桌面代理",
   "settings.appCheckedLabel": "上次检测",
   "settings.appPlatformLabel": "运行平台",
@@ -1224,6 +1249,19 @@ const zh: Record<MessageKey, string> = {
   "nodes.ippureErrorCore": "内核异常",
   "nodes.ippureErrorStatus": "接口状态异常",
   "nodes.ippureCustomUnsupported": "自写配置模式下不支持 IP 纯净度检测",
+  // 批次结论：全部失败时在列表上方显示一条，用来区分「节点坏了」和「检测服务连不上」，
+  // 避免用户面对一整屏一模一样的红色行无从判断。
+  "nodes.ippureDiagNodesFailed":
+    "所有节点都失败，但用当前连接可以正常访问纯净度服务 —— 问题在被测节点本身。",
+  "nodes.ippureDiagEndpointUnreachable":
+    "用当前连接也访问不到纯净度服务，因此这批结果不能说明节点的好坏。请检查网络后重试。",
+  "nodes.ippureDiagEndpointRejecting":
+    "纯净度服务拒绝了全部请求（被限制或频率过高）。请稍后重试。",
+  "nodes.ippureDiagConfigStale":
+    "这些节点在运行中的内核里都不存在。请重启代理以应用最新配置后重试。",
+  "nodes.ippureDiagAllFailed": "所有节点均失败，原因不一。将鼠标悬停在某一行可查看具体原因。",
+  "nodes.ippureEndpointWarning":
+    "当前似乎访问不到纯净度服务，这一批很可能每个节点都会失败。可以先停止，稍后再试。",
   "nodes.ippureRiskWhite": "纯净",
   "nodes.ippureRiskGreen": "低风险",
   "nodes.ippureRiskYellow": "中风险",

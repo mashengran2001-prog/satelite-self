@@ -1,6 +1,19 @@
 import { useI18n, type MessageKey } from "../i18n";
 import type { IppureResult } from "../types";
 
+/**
+ * Batch-level verdicts from the Rust `diagnose_batch`. Kept next to the
+ * per-row kinds below because they are read together: the row says what
+ * happened to one node, this says what it means for the run.
+ */
+export const IPPURE_DIAGNOSIS_KEYS: Record<string, MessageKey> = {
+  nodes_failed: "nodes.ippureDiagNodesFailed",
+  endpoint_unreachable: "nodes.ippureDiagEndpointUnreachable",
+  endpoint_rejecting: "nodes.ippureDiagEndpointRejecting",
+  config_stale: "nodes.ippureDiagConfigStale",
+  all_failed: "nodes.ippureDiagAllFailed",
+};
+
 const IPPURE_ERROR_KIND_KEYS: Record<string, MessageKey> = {
   abandoned: "nodes.ippureErrorAbandoned",
   refused: "nodes.ippureErrorRefused",
@@ -136,9 +149,13 @@ export function IppureDisplay({
   const score = result.fraud_score;
   const geo = result.country_code ?? result.country ?? "";
   const scoreLabel = score != null ? String(score) : "?";
+  // When a fallback answered, show its name instead of the score (which it
+  // doesn't provide) so the row reads "IP · ipwho.is · white" instead of
+  // looking like the score silently went missing.
+  const displayLabel = result.source ?? scoreLabel;
   const label = compact
-    ? `${scoreLabel} ${riskLabel}`
-    : [result.ip ?? (geo || "IP"), scoreLabel, riskLabel]
+    ? `${displayLabel} ${riskLabel}`
+    : [result.ip ?? (geo || "IP"), displayLabel, riskLabel]
         .filter(Boolean)
         .join(" · ");
   const nature = ippureNatureKey(result);

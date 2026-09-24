@@ -40,6 +40,13 @@ import type {
 import { RulesPage } from "./RulesPage";
 import { DnsPage } from "./DnsPage";
 import { HostsPage } from "./HostsPage";
+import type { Update } from "@tauri-apps/plugin-updater";
+import {
+  checkForSignedUpdate,
+  downloadAndInstall,
+  formatProgress,
+  type UpdateStage,
+} from "../appUpdater";
 
 type SettingsTab = "app" | "ports" | "rules" | "dns" | "hosts" | "core";
 
@@ -138,6 +145,13 @@ export function SettingsPage() {
   } | null>(null);
   const [appChecking, setAppChecking] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
+  /**
+   * In-app update state. Separate from `appUpdate`, which only compares release
+   * tags for the banner: this holds the signed artifact the updater resolved,
+   * and is null whenever no installable update exists.
+   */
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateStage, setUpdateStage] = useState<UpdateStage>({ kind: "idle" });
   /** Absolute path of the app's own executable, shown like the kernel path. */
   const [appPath, setAppPath] = useState<string | null>(null);
 
@@ -251,7 +265,18 @@ export function SettingsPage() {
       setAppChecking(true);
       if (reportError) setAppError(null);
       try {
-        setAppUpdate(await checkAppUpdate(force));
+        const result = await checkAppUpdate(force);
+        setAppUpdate(result);
+        // Resolve the signed artifact only when the tag check says there is
+        // something newer, so the common up-to-date path costs no extra
+        // request. A missing artifact (tag pushed without a build, or an
+        // unsupported platform) leaves this null and the UI falls back to the
+        // browser download link.
+        if (result.update_available) {
+          setPendingUpdate(await checkForSignedUpdate().catch(() => null));
+        } else {
+          setPendingUpdate(null);
+        }
       } catch (e) {
         if (reportError) {
           setAppError(typeof e === "string" ? e : String(e));
@@ -262,6 +287,17 @@ export function SettingsPage() {
     },
     [],
   );
+
+  const onInstallUpdate = useCallback(async () => {
+    if (!pendingUpdate || updateStage.kind !== "idle") return;
+    setAppError(null);
+    try {
+      await downloadAndInstall(pendingUpdate, setUpdateStage);
+    } catch (e) {
+      setAppError(typeof e === "string" ? e : String(e));
+      setUpdateStage({ kind: "idle" });
+    }
+  }, [pendingUpdate, updateStage.kind]);
 
   useEffect(() => {
     if (tab !== "core") return;
@@ -1462,15 +1498,35 @@ export function SettingsPage() {
                     ? t("settings.coreChecking")
                     : t("settings.coreCheck")}
                 </GlassButton>
-                {/* The app has no in-app downloader — "re-download" simply
-                   opens the latest GitHub release page in the browser. */}
-                <GlassButton
-                  variant="primary"
-                  icon="⤓"
-                  onClick={() => void openUrl(RELEASES_URL)}
-                >
-                  {t("settings.coreRedownload")}
-                </GlassButton>
+                {/* With a signed artifact resolved, update in place; otherwise
+                   fall back to opening the release page in the browser. */}
+                {pendingUpdate ? (
+                  <GlassButton
+                    variant="primary"
+                    icon="⤓"
+                    disabled={updateStage.kind !== "idle"}
+                    onClick={() => void onInstallUpdate()}
+                  >
+                    {updateStage.kind === "downloading"
+                      ? formatProgress(
+                          updateStage.downloaded,
+                          updateStage.total,
+                        )
+                      : updateStage.kind === "installing"
+                        ? t("settings.appInstalling")
+                        : updateStage.kind === "relaunching"
+                          ? t("settings.appRelaunching")
+                          : t("settings.appInstallUpdate")}
+                  </GlassButton>
+                ) : (
+                  <GlassButton
+                    variant="primary"
+                    icon="⤓"
+                    onClick={() => void openUrl(RELEASES_URL)}
+                  >
+                    {t("settings.coreRedownload")}
+                  </GlassButton>
+                )}
               </div>
             </div>
 

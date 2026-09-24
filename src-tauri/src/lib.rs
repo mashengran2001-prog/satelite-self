@@ -110,15 +110,19 @@ pub fn run() {
     // forwards argv to the first process on Windows/Linux.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            window_ctrl::show_main(app);
-        }));
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                window_ctrl::show_main(app);
+            }))
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
+        // Lets the updater restart the app onto the new version.
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let dir = match app.path().app_data_dir() {
                 Ok(dir) => dir,
@@ -146,6 +150,9 @@ pub fn run() {
             // Snapshot app prefs before move into managed state
             let silent = app_state
                 .with_store(|s| Ok(s.settings.silent_start))
+                .unwrap_or(false);
+            let pinned = app_state
+                .with_store(|s| Ok(s.settings.always_on_top))
                 .unwrap_or(false);
             let auto_proxy = app_state
                 .with_store(|s| Ok(s.settings.auto_start_proxy))
@@ -268,6 +275,12 @@ pub fn run() {
             // Multiple clients share clash:// · sing-box:// — claim default so
             // browser "one-click import" opens Satelite (not Sparkle / Verge / …).
             url_scheme::claim_subscription_schemes();
+
+            // The launch window comes from tauri.conf.json (not show_main), so the
+            // persisted pin has to be applied here.
+            if pinned {
+                window_ctrl::apply_always_on_top(app.handle(), true);
+            }
 
             // Silent start: hide only (do not destroy at launch — that can exit the app).
             // Skip when opened via one-click subscribe so the add form is visible.

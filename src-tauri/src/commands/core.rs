@@ -463,14 +463,48 @@ fn normalize_cmp(v: &str) -> String {
 /// than `local` (not merely different) — e.g. a bundled core ahead of the
 /// latest published release should not be flagged as "update available".
 fn is_newer_version(latest: &str, local: &str) -> bool {
-    parse_version(latest) > parse_version(local)
+    let (latest_release, latest_pre) = parse_version(latest);
+    let (local_release, local_pre) = parse_version(local);
+    // Release numbers decide first; the prerelease rank only breaks a tie
+    // between the same release, per semver.
+    match latest_release.cmp(&local_release) {
+        std::cmp::Ordering::Equal => latest_pre > local_pre,
+        ordering => ordering.is_gt(),
+    }
 }
 
-fn parse_version(v: &str) -> Vec<u32> {
-    normalize_cmp(v)
-        .split(['.', '-', '+'])
-        .map(|part| part.parse::<u32>().unwrap_or(0))
-        .collect()
+/// Release numbers, plus a rank ordering a prerelease *below* the release it
+/// precedes.
+///
+/// `1.14.0-beta1` must not read as newer than `1.14.0` — splitting the tag on
+/// `-` and folding `beta1` into a numeric segment used to do exactly that, and
+/// it also hid the beta→stable upgrade because the shorter release tag then
+/// compared as older.
+///
+/// The release part is padded to a fixed width so `1.13` and `1.13.0` compare
+/// equal instead of producing a cosmetic "update available".
+fn parse_version(v: &str) -> ([u32; 4], PreRank) {
+    let normalized = normalize_cmp(v);
+    // `+build` metadata is never significant for ordering.
+    let without_build = normalized.split('+').next().unwrap_or_default().to_string();
+    let (release, pre) = match without_build.split_once('-') {
+        Some((release, pre)) => (release, PreRank::Pre(pre.to_string())),
+        None => (without_build.as_str(), PreRank::Release),
+    };
+    let mut parts = [0u32; 4];
+    for (slot, part) in parts.iter_mut().zip(release.split('.')) {
+        *slot = part.trim().parse::<u32>().unwrap_or(0);
+    }
+    (parts, pre)
+}
+
+/// A release outranks every prerelease of the same version; two prereleases
+/// fall back to tag order (`beta2` > `beta1`), which is all the precision the
+/// update banner needs.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PreRank {
+    Pre(String),
+    Release,
 }
 
 /// The machine's LAN IPv4 (of the default-route interface), for the
@@ -552,5 +586,46 @@ mod tests {
     fn differing_segment_counts_compare_numerically() {
         assert!(is_newer_version("v1.13.2", "v1.13"));
         assert!(!is_newer_version("v1.13", "v1.13.2"));
+    }
+
+    #[test]
+    fn omitted_trailing_zero_is_not_an_update() {
+        // `1.13` and `1.13.0` are the same release; a cosmetic tag change
+        // must not raise the update banner in either direction.
+        assert!(!is_newer_version("v1.13", "v1.13.0"));
+        assert!(!is_newer_version("v1.13.0", "v1.13"));
+    }
+
+    #[test]
+    fn prerelease_is_older_than_its_release() {
+        // Splitting on `-` used to fold `beta1` into a numeric segment, making
+        // the beta compare as *newer* than the release it precedes.
+        assert!(!is_newer_version("v1.14.0-beta1", "v1.14.0"));
+    }
+
+    #[test]
+    fn release_upgrades_a_prerelease() {
+        // The other half of the same bug: a user on a beta was never offered
+        // the stable release that superseded it.
+        assert!(is_newer_version("v1.14.0", "v1.14.0-beta1"));
+    }
+
+    #[test]
+    fn later_prerelease_upgrades_an_earlier_one() {
+        assert!(is_newer_version("v1.14.0-beta2", "v1.14.0-beta1"));
+        assert!(!is_newer_version("v1.14.0-beta1", "v1.14.0-beta2"));
+    }
+
+    #[test]
+    fn prerelease_of_a_newer_release_is_still_an_update() {
+        // Release numbers decide before the prerelease rank does.
+        assert!(is_newer_version("v1.15.0-beta1", "v1.14.0"));
+        assert!(!is_newer_version("v1.14.0", "v1.15.0-beta1"));
+    }
+
+    #[test]
+    fn build_metadata_is_ignored() {
+        assert!(!is_newer_version("v1.13.18+build9", "v1.13.18"));
+        assert!(!is_newer_version("v1.13.18", "v1.13.18+build9"));
     }
 }

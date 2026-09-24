@@ -202,6 +202,18 @@ export interface IppureResult {
   error_kind?: string | null;
   tested_at: number;
   method: string;
+  /** Which service answered (e.g. `IPPure` or `ipwho.is`). Set only when a fallback answered. */
+  source?: string | null;
+}
+
+/** Batch-level verdict, present only when every tested node failed. */
+export interface IppureDiagnosis {
+  /**
+   * `nodes_failed` | `endpoint_unreachable` | `endpoint_rejecting`
+   * | `config_stale` | `all_failed`
+   */
+  code: string;
+  detail?: string | null;
 }
 
 export interface IppureBatchResult {
@@ -210,6 +222,7 @@ export interface IppureBatchResult {
   ok: number;
   failed: number;
   method: string;
+  diagnosis?: IppureDiagnosis | null;
 }
 
 export type AddSourceKind = "url" | "file" | "text" | "node" | "singbox";
@@ -334,6 +347,8 @@ export interface AppSettings {
   /** Frosted-glass look for repeated glass controls (costs backdrop-filter
    * GPU layers; default off = solid fills). */
   glass_frost?: boolean;
+  /** Keep the main window above other windows (pin). */
+  always_on_top?: boolean;
   /** Tray mark: badge | mark | ghost | buddy */
   tray_icon?: TrayIconStyle;
   /** Destroy WebView when closing to tray (free GPU/JS; tray+core stay). */

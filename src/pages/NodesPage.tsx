@@ -17,7 +17,10 @@ import {
 import { ErrorModal } from "../components/ErrorModal";
 import { GlassButton } from "../components/GlassButton";
 import { GlassSeg } from "../components/GlassSeg";
-import { IppureDisplay } from "../components/IppureDisplay";
+import {
+  IPPURE_DIAGNOSIS_KEYS,
+  IppureDisplay,
+} from "../components/IppureDisplay";
 import { waitForCoreRestart } from "../coreBusy";
 import { filterCustomNodes, applyCustomLatency, type CustomLatencyMap } from "../customNodes";
 import { useVirtualRange } from "../hooks/useVirtualRange";
@@ -118,6 +121,7 @@ export function NodesPage() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +159,10 @@ export function NodesPage() {
   );
   const [ippureDone, setIppureDone] = useState(0);
   const [ippureTotal, setIppureTotal] = useState(0);
+  // Batch-level verdict, plus an early warning while the batch is still
+  // running. Without these, a fully failed batch is a wall of identical red
+  // rows that never says whether the fault is the nodes or the probe service.
+  const [ippureNotice, setIppureNotice] = useState<string | null>(null);
   // Node ids whose last test used method "unsupported" (UDP-only protocol,
   // core not running) — shown as "start core to test" instead of "timeout".
   const [unsupportedIds, setUnsupportedIds] = useState<Set<string>>(new Set());
@@ -174,7 +182,11 @@ export function NodesPage() {
 
   const reload = useCallback(async (append = false) => {
     setError(null);
-    if (append) setLoadingMore(true);
+    if (append) {
+      setLoadingMore(true);
+    } else if (nodes.length > 0) {
+      setRefreshing(true);
+    }
     try {
       const settings = await getSettings();
       const custom = (settings.runtime_source ?? "generated").startsWith("singbox:");
@@ -214,6 +226,7 @@ export function NodesPage() {
     } finally {
       setLoading(false);
       setLoadingMore(false);
+      setRefreshing(false);
     }
   }, [nodes.length, query, sortMode, customLatency]);
 
@@ -454,12 +467,20 @@ export function NodesPage() {
     setIppureTesting(true);
     setError(null);
     setIppureDone(0);
+    setIppureNotice(null);
     let unlisten: (() => void) | undefined;
+    let unlistenWarning: (() => void) | undefined;
     try {
       const ids = await listNodeIds(query);
       setIppureTotal(ids.length);
       const idSet = new Set(ids);
       setIppureTestingIds(idSet);
+      // Fires before the rows start landing when the backend's control probe
+      // could not reach the purity service, so a doomed batch can be stopped
+      // early instead of running to the end for nothing.
+      unlistenWarning = await listen("ippure-endpoint-warning", () => {
+        setIppureNotice(t("nodes.ippureEndpointWarning"));
+      });
       // Stream each finished probe so rows stop spinning as results land.
       unlisten = await listen<IppureResult>("ippure-progress", (event) => {
         const r = event.payload;
@@ -481,10 +502,17 @@ export function NodesPage() {
       const next = new Map(ippureResultsRef.current);
       for (const r of batch.results) next.set(r.id, r);
       applyIppureResults(next);
+      // The backend only sends a verdict when every node failed; it supersedes
+      // the early warning because it had the full run to work from.
+      const key = batch.diagnosis
+        ? IPPURE_DIAGNOSIS_KEYS[batch.diagnosis.code]
+        : undefined;
+      setIppureNotice(key ? t(key) : null);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       unlisten?.();
+      unlistenWarning?.();
       setIppureTesting(false);
       setIppureTestingIds(new Set());
       if (sortMode === "ippure") {
@@ -617,6 +645,24 @@ export function NodesPage() {
         <ErrorModal message={error} onClose={() => setError(null)} />
       )}
 
+      {/* Batch verdict / early warning. A banner rather than a modal: it is
+          context for the rows below, not something to dismiss before reading
+          them. Dismissible because it outlives the run that produced it. */}
+      {ippureNotice && (
+        <div className="banner guide ippure-notice" role="status">
+          <span>{ippureNotice}</span>
+          <button
+            type="button"
+            className="banner-dismiss"
+            aria-label={t("common.close")}
+            title={t("common.close")}
+            onClick={() => setIppureNotice(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {switching && (
         <div className="banner busy" role="status">
           <span className="lat-spinner" aria-hidden />
@@ -624,7 +670,7 @@ export function NodesPage() {
         </div>
       )}
 
-      {loading ? (
+      {loading && nodes.length === 0 ? (
         <div className="empty">{t("common.loading")}</div>
       ) : displayed.length === 0 ? (
         <div className="empty card muted">
@@ -635,7 +681,21 @@ export function NodesPage() {
             : "—"}
         </div>
       ) : viewMode === "list" ? (
-        <div className="card table-wrap">
+        <div className="card table-wrap" style={{ position: "relative" }}>
+          {refreshing && (
+            <div style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(5, 7, 12, 0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+              pointerEvents: "none",
+            }}>
+              <span className="lat-spinner" aria-hidden />
+            </div>
+          )}
           <table>
             <thead>
               <tr>
@@ -724,7 +784,22 @@ export function NodesPage() {
         <div
           className={virtualized ? "node-grid-window" : undefined}
           ref={gridRange.containerRef as React.RefObject<HTMLDivElement>}
+          style={{ position: "relative" }}
         >
+          {refreshing && (
+            <div style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(5, 7, 12, 0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+              pointerEvents: "none",
+            }}>
+              <span className="lat-spinner" aria-hidden />
+            </div>
+          )}
           {gridRange.paddingTop > 0 && (
             <div style={{ height: gridRange.paddingTop }} aria-hidden="true" />
           )}

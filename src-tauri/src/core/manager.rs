@@ -829,8 +829,13 @@ fn elevated_kill_force(pid: u32) {
 
 fn map_tun_permission_hint(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
-    if lower.contains("operation not permitted")
-        || lower.contains("configure tun")
+    if lower.contains("create adapter: cannot create a file when that file already exists")
+        || (lower.contains("create adapter") && lower.contains("open existing adapter"))
+    {
+        format!(
+            "{err}\n\nTUN 虚拟网卡状态冲突。Satelite 将使用独立的 satelite-self 网卡名称避开旧适配器；请重新启动代理。若仍失败，请重启 Windows 后再试。"
+        )
+    } else if lower.contains("operation not permitted")
         || lower.contains("permission denied")
         || lower.contains("access is denied")
         // Chinese Windows error text / wintun HRESULT, e.g. from Xray's tun
@@ -849,6 +854,25 @@ fn map_tun_permission_hint(err: &str) -> String {
         format!("{err}\n\n{platform_hint}")
     } else {
         err.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tun_error_hint_tests {
+    use super::map_tun_permission_hint;
+
+    #[test]
+    fn adapter_name_conflict_is_not_reported_as_uac_denial() {
+        let error = "configure tun interface: (create adapter: Cannot create a file when that file already exists. | open existing adapter: Element not found.)";
+        let mapped = map_tun_permission_hint(error);
+        assert!(mapped.contains("虚拟网卡状态冲突"));
+        assert!(!mapped.contains("请在 UAC 弹窗中点"));
+    }
+
+    #[test]
+    fn access_denied_keeps_the_uac_hint() {
+        let mapped = map_tun_permission_hint("configure tun interface: Access is denied");
+        assert!(mapped.contains("请在 UAC 弹窗中点"));
     }
 }
 

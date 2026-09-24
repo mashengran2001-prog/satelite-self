@@ -257,6 +257,8 @@ export interface SettingsUpdatePayload {
   glowColor?: string | null;
   heroStyle?: string | null;
   glassFrost?: boolean | null;
+  /** Keep the main window above other windows. */
+  alwaysOnTop?: boolean | null;
   trayIcon?: string | null;
   unloadUiOnTray?: boolean | null;
   /** @deprecated prefer autoSelect */

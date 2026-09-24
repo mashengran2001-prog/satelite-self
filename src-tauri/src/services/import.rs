@@ -1218,6 +1218,7 @@ fn format_label(f: SubscriptionFormat) -> String {
         SubscriptionFormat::Base64UriList => "base64_uri_list".into(),
         SubscriptionFormat::SingboxJson => "singbox_json".into(),
         SubscriptionFormat::XrayJson => "xray_json".into(),
+        SubscriptionFormat::V2raynJson => "v2rayn_json".into(),
         SubscriptionFormat::Manual => "manual".into(),
     }
 }

@@ -1,8 +1,22 @@
-use crate::services::ippure::{probe_nodes_ippure_with_progress, IppureResult};
+use crate::services::ippure::{
+    diagnose_batch, endpoint_reachable, probe_nodes_ippure_with_progress, IppureDiagnosis,
+    IppureResult,
+};
 use crate::state::AppState;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
+
+/// Above this batch size, spend ~1s up front checking the probe endpoint over
+/// the current selection and warn the user immediately if it looks unreachable.
+/// Below it, the check is not worth the added latency — the batch finishes in
+/// about the same time it would take, and the diagnosis still runs at the end.
+const PREFLIGHT_MIN_NODES: usize = 5;
+/// A batch this small never pays for a control probe. The single-node path
+/// (dashboard "check current node") is the one the user actively waits on, and
+/// one red row with a specific reason already tells them what they need — a
+/// verdict about the batch as a whole says nothing extra there.
+const DIAGNOSE_MIN_NODES: usize = 2;
 
 /// How long to wait for a competing core transition (restart, TUN toggle,
 /// core switch) to finish before the purity probe takes over the core.
@@ -27,6 +41,10 @@ pub struct IppureBatchResult {
     pub ok: usize,
     pub failed: usize,
     pub method: String,
+    /// Present only when every node failed: says whether the fault looks like
+    /// the nodes, the probe endpoint, or a stale config. `None` on success or a
+    /// mixed batch, where the per-row kinds already explain enough.
+    pub diagnosis: Option<IppureDiagnosis>,
 }
 
 /// Probe the exit IP / IPPure fraud score for each node.
@@ -94,10 +112,24 @@ pub async fn test_nodes_ippure(
                 ok: 0,
                 failed: 0,
                 method: "none".into(),
+                diagnosis: None,
             });
         }
         (nodes, status.mixed_port, api)
     };
+
+    // Control probe over the selection the user is already on. It never blocks
+    // the batch — that selection could itself be a dead node while the rest are
+    // fine — but a failure here is worth surfacing before the user waits out a
+    // long run that is going to fail on every row.
+    let mut control_ok: Option<bool> = None;
+    if nodes.len() >= PREFLIGHT_MIN_NODES {
+        let reachable = endpoint_reachable(mixed_port).await;
+        control_ok = Some(reachable);
+        if !reachable {
+            let _ = app.emit("ippure-endpoint-warning", ());
+        }
+    }
 
     let results = probe_nodes_ippure_with_progress(
         &nodes,
@@ -112,12 +144,26 @@ pub async fn test_nodes_ippure(
 
     let ok = results.iter().filter(|r| r.error.is_none()).count();
     let failed = results.len() - ok;
+
+    // Everything failed and we have no control reading yet (mid-sized batch, so
+    // preflight was skipped). One probe now is what separates "your nodes are
+    // dead" from "the probe service is unreachable".
+    if ok == 0 && results.len() >= DIAGNOSE_MIN_NODES && control_ok.is_none() {
+        control_ok = Some(endpoint_reachable(mixed_port).await);
+    }
+    let diagnosis = if results.len() >= DIAGNOSE_MIN_NODES {
+        diagnose_batch(&results, control_ok)
+    } else {
+        None
+    };
+
     Ok(IppureBatchResult {
         tested: results.len(),
         ok,
         failed,
         results,
         method: "ippure".into(),
+        diagnosis,
     })
 }
 

@@ -662,6 +662,59 @@ button {
   outline: none;
 }
 
+/* Always-on-top pin. Same 1.45rem round footprint as the theme capsule's
+   buttons so the tools group keeps one baseline; active state borrows the
+   accent to read as "engaged" rather than merely hovered.
+
+   Sits last in `.topnav-tools`, directly under the native minimise button,
+   because it acts on the window rather than on the app. The extra left margin
+   sets it slightly apart from the app controls so the grouping reads correctly;
+   the native buttons live in the OS titlebar, which page content cannot draw
+   into, so this edge is as close as we can place it. */
+.topnav-pin-btn {
+  appearance: none !important;
+  width: 1.6rem;
+  height: 1.6rem;
+  min-width: 0;
+  margin-left: 0.28rem !important;
+  padding: 0 !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 50% !important;
+  background: color-mix(in srgb, var(--bg) 24%, transparent) !important;
+  color: var(--faint) !important;
+  display: inline-grid;
+  place-items: center;
+  box-shadow: none !important;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.topnav-pin-btn:hover:not(.active):not(:disabled) {
+  color: var(--text) !important;
+  background: var(--hover-wash) !important;
+}
+
+.topnav-pin-btn.active {
+  color: var(--on-primary) !important;
+  background: var(--primary) !important;
+  border-color: transparent !important;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--primary) 38%, transparent) !important;
+}
+
+.topnav-pin-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.topnav-pin-btn:focus,
+.topnav-pin-btn:focus-visible {
+  outline: none;
+}
+
 .topnav-status {
   display: flex;
   align-items: center;
@@ -848,6 +901,36 @@ button {
   padding: 0.5rem 0.7rem;
   margin-bottom: 0.65rem;
   font-size: 0.75rem;
+}
+
+/* IP-purity batch verdict. Sentence-length text, so it wraps and keeps the
+   dismiss control pinned to the top-right rather than centred beside a
+   multi-line paragraph. */
+.banner.guide.ippure-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  line-height: 1.45;
+}
+
+.ippure-notice .banner-dismiss {
+  appearance: none;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 0.15rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  opacity: 0.65;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: opacity 140ms ease;
+}
+
+.ippure-notice .banner-dismiss:hover,
+.ippure-notice .banner-dismiss:focus-visible {
+  opacity: 1;
 }
 
 /* Restart-in-progress banner: spinner + text (kernel auto → manual click). */
@@ -1250,8 +1333,9 @@ tr.row-active {
 }
 
 /* Compact table rows: tighter vertical padding + one-line clamped
-   descriptions keep the app tab inside the fixed 720px window without a
-   scrollbar (8 rows on the left column drive the card height). */
+   descriptions keep the app tab inside the default 720px-tall window without a
+   scrollbar (8 rows on the left column drive the card height). The window is
+   resizable, so shorter windows do scroll — this only keeps the default clean. */
 .settings-app-cols .settings-app-row {
   padding: 0.42rem 1rem;
 }

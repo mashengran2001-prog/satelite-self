@@ -17,18 +17,53 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const IPPURE_ENDPOINT: &str = "https://my.123169.xyz/v1/info";
+/// One probe service.
+#[derive(Debug)]
+struct Endpoint {
+    url: &'static str,
+    /// Short name shown on a row so a missing score explains itself.
+    label: &'static str,
+    /// Whether this service returns a fraud score. Only the primary does; a
+    /// fallback can still answer "which IP am I exiting from", which is the
+    /// other half of what the check is for.
+    scores: bool,
+}
+
+/// Probe endpoints, tried in order.
+///
+/// A single hard-coded host is a single point of failure: when it goes down or
+/// gets blocked, every node in a batch fails identically and it reads as "all
+/// my nodes are broken". The fallback keeps the exit-IP answer working in that
+/// case, clearly marked as score-less rather than silently degraded.
+///
+/// Candidates are checked for actually working without an API key —
+/// `ipinfo.io` and `ipapi.co` both return 429 to unauthenticated callers now,
+/// so neither is usable here.
+const IPPURE_ENDPOINTS: &[Endpoint] = &[
+    Endpoint {
+        url: "https://my.123169.xyz/v1/info",
+        label: "IPPure",
+        scores: true,
+    },
+    Endpoint {
+        url: "https://ipwho.is/",
+        label: "ipwho.is",
+        scores: false,
+    },
+];
 /// Time for the selector switch to reach the new outbound before probing.
-const SWITCH_SETTLE_MS: u64 = 200;
+/// Wait after switching the `proxy` selector so the core closes old outbound
+/// connections and the next HTTP request uses the newly selected node's path.
+/// 200ms was too short; cores often reused the previous node's connection.
+const SWITCH_SETTLE_MS: u64 = 500;
 const CLASH_API_TIMEOUT: Duration = Duration::from_secs(2);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(6);
 /// Brief bounded retries for transient local API / endpoint hiccups. They are
 /// intentionally small so a genuinely dead node still fails fast.
 const SELECT_RETRIES: usize = 2;
 const SELECT_RETRY_DELAY: Duration = Duration::from_millis(250);
-/// A fresh attempt gives weak nodes a second chance after a reset, timeout,
-/// or 5xx from the endpoint. Two attempts still fail fast for a truly dead
-/// node while making transient failures much less likely to become red rows.
+/// A fresh attempt gives weak nodes a second chance after a reset or a 5xx.
+/// Deliberately *not* used for timeouts — see `is_retryable_http_error`.
 const HTTP_RETRIES: usize = 2;
 const HTTP_RETRY_DELAY: Duration = Duration::from_millis(350);
 
@@ -53,6 +88,10 @@ pub struct IppureResult {
     pub error_kind: Option<String>,
     pub tested_at: i64,
     pub method: String,
+    /// Which service answered, e.g. `IPPure` or `ipwho.is`. Set only when a
+    /// fallback answered, so the UI can say why a row has an IP but no score
+    /// instead of looking like the score silently went missing.
+    pub source: Option<String>,
 }
 
 impl IppureResult {
@@ -61,11 +100,19 @@ impl IppureResult {
         name: String,
         response: IppureResponse,
         tested_at: i64,
+        endpoint: &Endpoint,
     ) -> Self {
         let risk = response
             .fraud_score
             .map(risk_level)
             .map(ToString::to_string);
+        // Flatten `ipwho.is`'s nested operator into the same field the primary
+        // reports, preferring the more specific `org` over `isp`.
+        let as_organization = response.as_organization.or_else(|| {
+            response
+                .connection
+                .and_then(|c| c.org.or(c.isp))
+        });
         Self {
             id,
             name,
@@ -74,7 +121,7 @@ impl IppureResult {
             risk,
             is_residential: response.is_residential,
             is_broadcast: response.is_broadcast,
-            as_organization: response.as_organization,
+            as_organization,
             country: response.country,
             country_code: response.country_code,
             region: response.region,
@@ -83,6 +130,9 @@ impl IppureResult {
             error_kind: None,
             tested_at,
             method: "ippure".into(),
+            // Only tag fallbacks: tagging the primary would put a redundant
+            // badge on every normal row.
+            source: (!endpoint.scores).then(|| endpoint.label.to_string()),
         }
     }
 
@@ -97,6 +147,71 @@ impl IppureResult {
             ..Self::default()
         }
     }
+}
+
+/// Batch-level verdict for a run where *every* node failed.
+///
+/// Per-row `error_kind` explains one node; it cannot tell the user whether the
+/// fault is theirs at all. A batch of 80 red rows saying 超时 looks like "all my
+/// nodes are dead" when the real cause is the probe endpoint being blocked or
+/// down. `code` is a stable key the UI localizes; `detail` carries the raw
+/// error for a tooltip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IppureDiagnosis {
+    pub code: String,
+    pub detail: Option<String>,
+}
+
+/// Endpoint-side kinds: the tunnel worked, the service refused or misbehaved.
+const ENDPOINT_KINDS: &[&str] =
+    &["blocked", "limited", "auth", "endpoint", "response", "status"];
+/// Tunnel-side kinds: the request never got a usable answer back.
+const TUNNEL_KINDS: &[&str] =
+    &["timeout", "refused", "reset", "dns", "tls", "tunnel"];
+
+/// Derive the batch verdict from the per-node failures plus a control probe run
+/// through the selection the user was already on.
+///
+/// `control_ok` is `Some(true)` when the endpoint answered over the original
+/// selection, `Some(false)` when it did not, `None` when it was not run.
+/// Returns `None` when at least one node succeeded — the per-row kinds are
+/// enough in that case.
+pub fn diagnose_batch(
+    results: &[IppureResult],
+    control_ok: Option<bool>,
+) -> Option<IppureDiagnosis> {
+    if results.is_empty() || results.iter().any(|r| r.error.is_none()) {
+        return None;
+    }
+    let detail = results.iter().find_map(|r| r.error.clone());
+    let kind_is = |set: &[&str]| {
+        results.iter().all(|r| {
+            r.error_kind
+                .as_deref()
+                .is_some_and(|k| set.contains(&k))
+        })
+    };
+
+    let code = if kind_is(&["abandoned"]) {
+        // Every outbound is missing from the running core.
+        "config_stale"
+    } else if kind_is(ENDPOINT_KINDS) {
+        "endpoint_rejecting"
+    } else if kind_is(TUNNEL_KINDS) {
+        match control_ok {
+            // The endpoint answers fine over the user's own selection, so the
+            // tested nodes really are the problem.
+            Some(true) => "nodes_failed",
+            Some(false) => "endpoint_unreachable",
+            None => "all_failed",
+        }
+    } else {
+        "all_failed"
+    };
+    Some(IppureDiagnosis {
+        code: code.into(),
+        detail,
+    })
 }
 
 /// Maps a raw probe failure to a stable, UI-friendly category. The UI shows a
@@ -227,7 +342,7 @@ async fn probe_one(
     }
 
     match outcome {
-        Ok(response) => IppureResult::from_response(id, name, response, tested_at),
+        Ok((response, endpoint)) => IppureResult::from_response(id, name, response, tested_at, endpoint),
         Err(error) => IppureResult::failed(id, name, error.to_string(), tested_at),
     }
 }
@@ -238,19 +353,55 @@ fn ippure_client(mixed_port: u16) -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
         .proxy(proxy)
         .connect_timeout(Duration::from_secs(5))
+        // Force each request to establish a fresh TCP connection to the proxy
+        // so switching nodes actually changes the outbound path rather than
+        // reusing a keep-alive connection from the previous node.
         .pool_max_idle_per_host(0)
+        .pool_idle_timeout(Duration::ZERO)
+        .http1_only()
+        .tcp_nodelay(true)
         .user_agent("Satelite/1.0 (IPPure)")
         .build()
         .map_err(|e| AppError::Core(format!("ippure client: {e}")))
 }
 
-async fn query_ippure(client: &reqwest::Client) -> AppResult<IppureResponse> {
+/// Flatten a `reqwest` error into a message that still names the cause.
+///
+/// `reqwest::Error`'s own `Display` stops at "error sending request for url
+/// (…)" and keeps the useful part — "operation timed out", "connection
+/// refused" — in its `source` chain. Formatting only the top level therefore
+/// threw away exactly what both the retry policy and the per-row `error_kind`
+/// classify on, so every timeout used to read as a generic tunnel failure and
+/// got retried as if it were transient.
+fn describe_http_error(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Chains often repeat the wrapper's wording; keep the message short.
+        if !parts.iter().any(|part| part.contains(&text)) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    // Hyper reports a timeout as a bare "operation timed out" deep in the
+    // chain, but a client-side deadline surfaces only via `is_timeout`.
+    if error.is_timeout() && !parts.iter().any(|p| p.contains("timed out")) {
+        parts.push("operation timed out".into());
+    }
+    parts.join(": ")
+}
+
+async fn query_ippure(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> AppResult<IppureResponse> {
     let response = client
-        .get(IPPURE_ENDPOINT)
+        .get(endpoint)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Core(format!("ippure http: {e}")))?;
+        .map_err(|e| AppError::Core(format!("ippure http: {}", describe_http_error(&e))))?;
     if !response.status().is_success() {
         return Err(AppError::Core(format!(
             "ippure http status {}",
@@ -283,16 +434,57 @@ async fn select_with_retry(api: &ClashApi, tag: &str) -> AppResult<()> {
     Err(last_error.expect("retry loop always records a transient error"))
 }
 
-/// The IPPure endpoint occasionally drops / 5xxes and weak nodes can reset
-/// the tunnel mid-request. A fresh client per attempt avoids reusing a broken
-/// proxy connection while still failing fast for a genuinely dead node.
-async fn query_ippure_with_retry(mixed_port: u16) -> AppResult<IppureResponse> {
+/// Control probe: can the endpoint be reached over whatever is selected right
+/// now? Run *without* touching the selector, so it measures the path the user
+/// is already browsing on. Its only job is to tell "your nodes are dead" apart
+/// from "the probe service is unreachable" — see [`diagnose_batch`].
+pub async fn endpoint_reachable(mixed_port: u16) -> bool {
+    query_ippure_with_retry(mixed_port).await.map(|_| ()).is_ok()
+}
+
+/// Query the endpoints in order through the node's tunnel.
+///
+/// Two rules keep a batch from grinding on dead nodes, which used to dominate
+/// the wall clock — a dead node cost two full 6s timeouts (~12.6s) while a
+/// healthy one costs well under 2s:
+///
+/// 1. A timeout is *terminal*. Waiting 6s already answered the question; a
+///    second 6s wait almost never turns into a result.
+/// 2. Fallback endpoints are only tried when the tunnel demonstrably works
+///    (we got an HTTP status or a parse error back). Walking the list through
+///    a dead tunnel would cost one timeout per endpoint instead of one total.
+async fn query_ippure_with_retry(
+    mixed_port: u16,
+) -> AppResult<(IppureResponse, &'static Endpoint)> {
+    let mut last_error: Option<AppError> = None;
+    for endpoint in IPPURE_ENDPOINTS {
+        match query_endpoint_with_retry(mixed_port, endpoint.url).await {
+            Ok(response) => return Ok((response, endpoint)),
+            Err(error) => {
+                let endpoint_answered = tunnel_reached_endpoint(&error);
+                last_error = Some(error);
+                if !endpoint_answered {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("endpoint loop always records an error"))
+}
+
+/// One endpoint, with bounded retries for failures that are both transient and
+/// *fast* — a reset or 5xx costs milliseconds, so a second try is cheap.
+async fn query_endpoint_with_retry(
+    mixed_port: u16,
+    endpoint: &str,
+) -> AppResult<IppureResponse> {
     let mut last_error: Option<AppError> = None;
     for attempt in 0..HTTP_RETRIES {
+        // A fresh client per attempt avoids reusing a broken proxy connection.
         let client = ippure_client(mixed_port)?;
-        match query_ippure(&client).await {
+        match query_ippure(&client, endpoint).await {
             Ok(response) => return Ok(response),
-            Err(error) if is_transient_http_error(&error) => {
+            Err(error) if is_retryable_http_error(&error) => {
                 last_error = Some(error);
                 if attempt + 1 == HTTP_RETRIES {
                     break;
@@ -317,14 +509,37 @@ fn is_transient_clash_error(error: &AppError) -> bool {
         .is_some_and(|code| matches!(code, 408 | 425 | 429) || (500..600).contains(&code))
 }
 
-fn is_transient_http_error(error: &AppError) -> bool {
+/// Worth a second attempt against the *same* endpoint.
+///
+/// Excludes timeouts on purpose: the attempt already spent the full
+/// `HTTP_TIMEOUT` proving the tunnel does not carry traffic, and repeating it
+/// doubles the cost of every dead node in the batch. Also excludes a refused
+/// connection, which is an immediate, definitive answer.
+fn is_retryable_http_error(error: &AppError) -> bool {
     let raw = error.to_string();
     let message = raw.strip_prefix("core error: ").unwrap_or(&raw);
-    // Transport-level failures before a response arrived.
     if message.starts_with("ippure http:") {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return false;
+        }
+        if lower.contains("refused") {
+            return false;
+        }
+        // Reset / EOF / handshake stumbles fail fast, so retrying is cheap.
         return true;
     }
-    response_status(&message).is_some_and(|code| code == 429 || (500..600).contains(&code))
+    response_status(message).is_some_and(|code| code == 429 || (500..600).contains(&code))
+}
+
+/// True when the request actually reached an endpoint and it answered — an
+/// HTTP status or a body we could not parse. Only then is trying the next
+/// endpoint in the list worthwhile; a transport failure is the node's problem
+/// and every other endpoint would fail the same way.
+fn tunnel_reached_endpoint(error: &AppError) -> bool {
+    let raw = error.to_string();
+    let message = raw.strip_prefix("core error: ").unwrap_or(&raw);
+    message.starts_with("ippure json:") || response_status(message).is_some()
 }
 
 fn response_status(message: &str) -> Option<u16> {
@@ -389,6 +604,16 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// `ipwho.is`'s nested operator block. Only the fields we surface are declared;
+/// serde ignores the rest.
+#[derive(Debug, Clone, Deserialize)]
+struct IppureConnection {
+    #[serde(default)]
+    org: Option<String>,
+    #[serde(default)]
+    isp: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct IppureResponse {
     #[serde(default)]
@@ -416,6 +641,11 @@ struct IppureResponse {
     is_broadcast: Option<bool>,
     #[serde(default, rename = "asOrganization", alias = "as_organization")]
     as_organization: Option<String>,
+    /// `ipwho.is` nests the operator under `connection`; folded into
+    /// `as_organization` by `IppureResult::from_response` so the UI needs no
+    /// per-endpoint special case.
+    #[serde(default)]
+    connection: Option<IppureConnection>,
     #[serde(default)]
     country: Option<String>,
     #[serde(default, rename = "countryCode", alias = "country_code")]
@@ -532,6 +762,22 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    /// The scoring service, i.e. the one whose results carry no `source` tag.
+    fn primary_endpoint() -> &'static Endpoint {
+        IPPURE_ENDPOINTS
+            .iter()
+            .find(|e| e.scores)
+            .expect("a scoring endpoint is configured")
+    }
+
+    /// A fallback: answers with an IP but no fraud score.
+    fn fallback_endpoint() -> &'static Endpoint {
+        IPPURE_ENDPOINTS
+            .iter()
+            .find(|e| !e.scores)
+            .expect("a fallback endpoint is configured")
+    }
+
     fn node(id: &str) -> ProxyNode {
         ProxyNode {
             id: id.into(),
@@ -579,10 +825,13 @@ mod tests {
             "node".into(),
             response,
             now_secs(),
+            primary_endpoint(),
         );
         assert_eq!(result.risk.as_deref(), Some("green"));
         assert_eq!(result.ip.as_deref(), Some("1.2.3.4"));
         assert!(result.error.is_none());
+        // The primary is never tagged — a badge on every normal row is noise.
+        assert_eq!(result.source, None);
     }
 
     #[test]
@@ -598,9 +847,74 @@ mod tests {
     fn missing_fields_are_tolerated() {
         let response: IppureResponse = serde_json::from_str(r#"{"ip":"9.9.9.9"}"#).expect("parse");
         assert_eq!(response.fraud_score, None);
-        let result = IppureResult::from_response("n1".into(), "node".into(), response, 0);
+        let result =
+            IppureResult::from_response("n1".into(), "node".into(), response, 0, primary_endpoint());
         assert_eq!(result.risk, None);
         assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn fallback_operator_is_flattened_and_tagged() {
+        // `ipwho.is` nests the operator under `connection` and returns no
+        // score. Both differences are absorbed here so the UI needs no
+        // per-endpoint special case.
+        let json = r#"{
+          "ip": "5.6.7.8",
+          "country": "United States",
+          "country_code": "US",
+          "connection": {"org": "Acme Telecom", "isp": "Acme ISP"}
+        }"#;
+        let response: IppureResponse = serde_json::from_str(json).expect("parse response");
+        let result = IppureResult::from_response(
+            "n1".into(),
+            "node".into(),
+            response,
+            0,
+            fallback_endpoint(),
+        );
+        assert_eq!(result.ip.as_deref(), Some("5.6.7.8"));
+        // `org` is more specific than `isp`, so it wins.
+        assert_eq!(result.as_organization.as_deref(), Some("Acme Telecom"));
+        // No score means no risk verdict — the row must not imply one.
+        assert_eq!(result.fraud_score, None);
+        assert_eq!(result.risk, None);
+        // The tag is what lets the UI explain the missing score.
+        assert_eq!(result.source.as_deref(), Some(fallback_endpoint().label));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn fallback_falls_back_to_isp_when_org_is_absent() {
+        let json = r#"{"ip":"5.6.7.8","connection":{"isp":"Acme ISP"}}"#;
+        let response: IppureResponse = serde_json::from_str(json).expect("parse response");
+        let result = IppureResult::from_response(
+            "n1".into(),
+            "node".into(),
+            response,
+            0,
+            fallback_endpoint(),
+        );
+        assert_eq!(result.as_organization.as_deref(), Some("Acme ISP"));
+    }
+
+    #[test]
+    fn top_level_operator_wins_over_nested() {
+        // The primary reports `as_organization` directly; a nested block must
+        // never override it.
+        let json = r#"{
+          "ip": "1.2.3.4",
+          "as_organization": "Primary Org",
+          "connection": {"org": "Nested Org"}
+        }"#;
+        let response: IppureResponse = serde_json::from_str(json).expect("parse response");
+        let result = IppureResult::from_response(
+            "n1".into(),
+            "node".into(),
+            response,
+            0,
+            primary_endpoint(),
+        );
+        assert_eq!(result.as_organization.as_deref(), Some("Primary Org"));
     }
 
     #[test]
@@ -637,18 +951,104 @@ mod tests {
             "proxy now json: boom".into()
         )));
 
-        assert!(is_transient_http_error(&AppError::Core(
+        assert!(is_retryable_http_error(&AppError::Core(
             "ippure http: error sending request".into()
         )));
-        assert!(is_transient_http_error(&AppError::Core(
+        assert!(is_retryable_http_error(&AppError::Core(
             "ippure http status 503".into()
         )));
-        assert!(!is_transient_http_error(&AppError::Core(
+        assert!(!is_retryable_http_error(&AppError::Core(
             "ippure http status 407".into()
         )));
-        assert!(!is_transient_http_error(&AppError::Core(
+        assert!(!is_retryable_http_error(&AppError::Core(
             "ippure json: boom".into()
         )));
+
+        // A timeout already spent the full budget, and a refusal is definitive:
+        // retrying either one only doubles the cost of a dead node.
+        assert!(!is_retryable_http_error(&AppError::Core(
+            "ippure http: operation timed out".into()
+        )));
+        assert!(!is_retryable_http_error(&AppError::Core(
+            "ippure http: error trying to connect: connection refused".into()
+        )));
+        // A reset fails fast, so it stays retryable.
+        assert!(is_retryable_http_error(&AppError::Core(
+            "ippure http: connection reset by peer".into()
+        )));
+
+        // Only an endpoint that actually answered justifies trying the next one.
+        assert!(tunnel_reached_endpoint(&AppError::Core(
+            "ippure http status 503".into()
+        )));
+        assert!(tunnel_reached_endpoint(&AppError::Core(
+            "ippure json: boom".into()
+        )));
+        assert!(!tunnel_reached_endpoint(&AppError::Core(
+            "ippure http: operation timed out".into()
+        )));
+        assert!(!tunnel_reached_endpoint(&AppError::Core(
+            "ippure http: connection reset by peer".into()
+        )));
+    }
+
+    fn failed_result(kind: &str) -> IppureResult {
+        IppureResult {
+            error: Some(format!("core error: ippure http: {kind}")),
+            error_kind: Some(kind.into()),
+            ..IppureResult::default()
+        }
+    }
+
+    #[test]
+    fn diagnosis_only_fires_when_every_node_failed() {
+        assert_eq!(diagnose_batch(&[], Some(true)), None);
+        let mixed = vec![IppureResult::default(), failed_result("timeout")];
+        assert_eq!(diagnose_batch(&mixed, Some(false)), None);
+    }
+
+    #[test]
+    fn diagnosis_separates_dead_nodes_from_an_unreachable_endpoint() {
+        let all_timeout = vec![failed_result("timeout"), failed_result("refused")];
+
+        // Endpoint answers over the user's own selection -> the nodes are at fault.
+        let verdict = diagnose_batch(&all_timeout, Some(true)).expect("verdict");
+        assert_eq!(verdict.code, "nodes_failed");
+        assert!(verdict.detail.is_some(), "detail carries the raw error");
+
+        // It does not answer there either -> the probe service is unreachable.
+        assert_eq!(
+            diagnose_batch(&all_timeout, Some(false)).expect("verdict").code,
+            "endpoint_unreachable"
+        );
+
+        // No control reading -> stay honest rather than blame either side.
+        assert_eq!(
+            diagnose_batch(&all_timeout, None).expect("verdict").code,
+            "all_failed"
+        );
+    }
+
+    #[test]
+    fn diagnosis_flags_endpoint_and_stale_config_cases() {
+        let blocked = vec![failed_result("blocked"), failed_result("limited")];
+        assert_eq!(
+            diagnose_batch(&blocked, Some(true)).expect("verdict").code,
+            "endpoint_rejecting"
+        );
+
+        let gone = vec![failed_result("abandoned"), failed_result("abandoned")];
+        assert_eq!(
+            diagnose_batch(&gone, Some(true)).expect("verdict").code,
+            "config_stale"
+        );
+
+        // Mixed causes must not be pinned on one side.
+        let mixed = vec![failed_result("timeout"), failed_result("blocked")];
+        assert_eq!(
+            diagnose_batch(&mixed, Some(true)).expect("verdict").code,
+            "all_failed"
+        );
     }
 
     #[test]
@@ -727,6 +1127,64 @@ mod tests {
             Some("response")
         );
         assert_eq!(classify_error_kind("core error: something weird"), None);
+    }
+
+    /// The performance fix, asserted on behaviour rather than on a stopwatch.
+    ///
+    /// A hung tunnel used to cost two full `HTTP_TIMEOUT` waits per node
+    /// (~12.6s), and walking the fallback endpoints would have cost one wait
+    /// each. Both are bounded by refusing to retry or fall back after a
+    /// timeout, so exactly one connection may reach the proxy.
+    #[tokio::test]
+    async fn a_hung_tunnel_costs_exactly_one_timeout() {
+        // Accepts the CONNECT and then never answers — the tunnel equivalent of
+        // a dead node that still completes a TCP handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind blackhole");
+        let port = listener.local_addr().expect("address").port();
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_server = Arc::clone(&attempts);
+
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                *attempts_for_server.lock().expect("attempts") += 1;
+                // Hold the socket open so the client waits for its timeout
+                // instead of seeing an immediate EOF (which is retryable).
+                held.push(socket);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = query_ippure_with_retry(port).await;
+        let elapsed = started.elapsed();
+        server.abort();
+
+        assert!(outcome.is_err(), "a hung tunnel cannot produce a result");
+        // The flattened message must name the cause, or `error_kind` degrades
+        // to a generic tunnel failure and the retry policy misfires.
+        let message = outcome.expect_err("timeout").to_string();
+        assert!(
+            message.contains("timed out"),
+            "cause must survive into the message, got: {message}"
+        );
+        assert_eq!(
+            classify_error_kind(&message),
+            Some("timeout"),
+            "a hung tunnel must be reported as a timeout, not a generic tunnel error"
+        );
+        assert_eq!(
+            *attempts.lock().expect("attempts"),
+            1,
+            "a timeout must not be retried, and must not walk the endpoint list"
+        );
+        // One timeout, not two, and not one per endpoint.
+        assert!(
+            elapsed < HTTP_TIMEOUT * 2,
+            "took {elapsed:?}, expected roughly one {HTTP_TIMEOUT:?} timeout"
+        );
     }
 
     #[tokio::test]

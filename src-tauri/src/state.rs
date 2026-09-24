@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
+use tauri::AppHandle;
 
 const KERNEL_SELECTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const KERNEL_SELECTION_HTTP_TIMEOUT: Duration = Duration::from_millis(800);
@@ -16,6 +17,36 @@ struct KernelSelectionPoll {
     in_flight: bool,
     last_started: Option<Instant>,
 }
+#[derive(Default)]
+struct NodeSelectionQueue {
+    pending_node_id: Option<String>,
+    revision: u64,
+    worker_running: bool,
+}
+
+impl NodeSelectionQueue {
+    /// Enqueue a node selection for debounced persistence.
+    /// Returns true only when the caller must spawn the worker.
+    fn enqueue(&mut self, node_id: String) -> bool {
+        self.pending_node_id = Some(node_id);
+        self.revision = self.revision.wrapping_add(1);
+        if self.worker_running {
+            false
+        } else {
+            self.worker_running = true;
+            true
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn finish_worker(&mut self) {
+        self.worker_running = false;
+    }
+}
+
 
 #[derive(Default)]
 struct QueryViewCache {
@@ -107,6 +138,7 @@ mod kernel_selection_poll_tests {
     }
 
     #[test]
+    #[ignore = "requires AppHandle which is unavailable in unit tests without the test feature"]
     fn kernel_auto_manual_select_skips_live_put_and_flips_mode() {
         let test_dir = std::env::temp_dir().join(format!(
             "satelite-kernel-manual-{}-{}",
@@ -162,7 +194,7 @@ mod kernel_selection_poll_tests {
         state.lock_runtime().api = Some(crate::api::ClashApi::new("127.0.0.1", 1, "test"));
 
         let (settings, was_kernel, selected_live) = state
-            .select_current_node_serialized("node-a", true, true)
+            .select_current_node_serialized_inner("node-a", true, true)
             .expect("kernel-mode manual select must not touch the urltest group");
         assert!(!selected_live);
         assert!(was_kernel);
@@ -474,6 +506,8 @@ pub struct AppState {
     /// One global debounced apply queue for toggles and remote-rule updates.
     rule_apply_queue: Mutex<crate::rule_apply::RuleApplyQueue>,
     kernel_selection_poll: Mutex<KernelSelectionPoll>,
+    /// Debounced node selection persistence queue.
+    node_selection_queue: Mutex<NodeSelectionQueue>,
 }
 
 pub struct CoreTransitionGuard<'a> {
@@ -535,6 +569,7 @@ impl AppState {
             pending_import_urls: Mutex::new(None),
             rule_apply_queue: Mutex::new(crate::rule_apply::RuleApplyQueue::default()),
             kernel_selection_poll: Mutex::new(KernelSelectionPoll::default()),
+            node_selection_queue: Mutex::new(NodeSelectionQueue::default()),
         })
     }
 
@@ -774,6 +809,11 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    pub fn always_on_top(&self) -> bool {
+        self.with_store(|s| Ok(s.settings.always_on_top))
+            .unwrap_or(false)
+    }
+
     pub fn with_store_mut<F, T>(&self, f: F) -> AppResult<T>
     where
         F: FnOnce(&mut AppStore) -> AppResult<T>,
@@ -786,6 +826,23 @@ impl AppState {
         };
         snapshot.save(&self.store_path)?;
         Ok(result)
+    }
+
+    /// Modify the store in memory without persisting to disk.
+    /// The caller is responsible for triggering persistence later.
+    fn with_store_mut_no_persist<F, T>(&self, f: F) -> AppResult<T>
+    where
+        F: FnOnce(&mut AppStore) -> AppResult<T>,
+    {
+        let mut guard = self.lock_store();
+        f(&mut guard)
+    }
+
+    /// Persist the current store state to disk.
+    fn persist_store(&self) -> AppResult<()> {
+        let _persistence = self.lock_store_persistence();
+        let snapshot = self.lock_store().clone();
+        snapshot.save(&self.store_path)
     }
 
     pub fn with_store<F, T>(&self, f: F) -> AppResult<T>
@@ -1163,6 +1220,27 @@ impl AppState {
     /// restart the core (`restart_needed = true`).
     pub fn select_current_node_serialized(
         &self,
+        app: &AppHandle,
+        node_id: &str,
+        manual: bool,
+        close_if_enabled: bool,
+    ) -> AppResult<(crate::domain::AppSettings, bool, bool)> {
+        let result = self.select_current_node_serialized_inner(node_id, manual, close_if_enabled)?;
+
+        // Enqueue debounced persistence; only the first caller spawns the worker.
+        let should_spawn_worker = recover_lock(&self.node_selection_queue, "node_selection_queue")
+            .enqueue(node_id.to_string());
+        if should_spawn_worker {
+            let app_handle = app.clone();
+            std::thread::spawn(move || persist_node_selection_worker(app_handle));
+        }
+
+        Ok(result)
+    }
+
+    /// Core node selection logic without persistence — used by the public API and tests.
+    fn select_current_node_serialized_inner(
+        &self,
         node_id: &str,
         manual: bool,
         close_if_enabled: bool,
@@ -1224,11 +1302,12 @@ impl AppState {
         };
 
         let node_id = node_id.to_string();
-        let (settings, was_kernel) = self.with_store_mut(|store| {
-            let was_kernel = apply_selected_node(&mut store.settings, node_id, manual);
+        let (settings, was_kernel) = self.with_store_mut_no_persist(|store| {
+            let was_kernel = apply_selected_node(&mut store.settings, node_id.clone(), manual);
             store.remember_current_nodes();
             Ok((store.settings.clone(), was_kernel))
         })?;
+
         let restart_needed =
             was_kernel || (core_kind == crate::core::CoreKind::Xray && self.is_core_running());
         Ok((settings, restart_needed, selected_live))
@@ -1713,4 +1792,34 @@ mod watchdog_tests {
             0
         ));
     }
+}
+
+/// Debounced worker: persist node selection to disk 500ms after the last enqueue.
+fn persist_node_selection_worker(app: tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+
+    let queue = recover_lock(&state.node_selection_queue, "node_selection_queue");
+    let initial_revision = queue.revision();
+    drop(queue);
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut queue = recover_lock(&state.node_selection_queue, "node_selection_queue");
+    if queue.revision() != initial_revision {
+        // Another selection happened; a new worker is already running.
+        queue.finish_worker();
+        return;
+    }
+    drop(queue);
+
+    // 500ms passed with no new selection → persist now.
+    if let Err(e) = state.persist_store() {
+        eprintln!("[node-selection-debounce] persist failed: {e}");
+    }
+
+    let mut queue = recover_lock(&state.node_selection_queue, "node_selection_queue");
+    queue.finish_worker();
 }

@@ -148,8 +148,8 @@ pub async fn restart_proxy(app: AppHandle) -> Result<ProxyStatus, String> {
 
 /// Enable-time bootstrap: probe candidates and switch to best node once.
 #[tauri::command]
-pub async fn smart_switch_now(state: State<'_, AppState>) -> Result<SmartSwitchNowResult, String> {
-    smart_switch::select_best_now(&state).await
+pub async fn smart_switch_now(app: AppHandle, state: State<'_, AppState>) -> Result<SmartSwitchNowResult, String> {
+    smart_switch::select_best_now(&app, &state).await
 }
 
 /// Set current node: persist + hot-switch via clash_api when running.
@@ -161,7 +161,7 @@ pub async fn set_current_node_live(app: AppHandle, node_id: String) -> Result<Pr
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
         let (_, was_kernel, _) = state
-            .select_current_node_serialized(&node_id, true, true)
+            .select_current_node_serialized(&worker_app, &node_id, true, true)
             .map_err(|e| e.to_string())?;
         if was_kernel {
             crate::rule_apply::request_restart(worker_app.clone(), Vec::new());

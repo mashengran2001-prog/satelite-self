@@ -55,12 +55,9 @@ pub struct BuildOptions {
     /// after the rule sets (a safety net ahead of `route.final`). Rule mode
     /// only; Global proxies everything by explicit user choice.
     pub bypass_lan: bool,
-    /// macOS-only, Xray-only: the `utunN` device name to bind the TUN
-    /// inbound to. Xray's darwin backend rejects any name that does not
-    /// parse as `utun<digits>` (unlike sing-box, which lets the OS assign
-    /// one), so the caller must probe a free index before building the
-    /// config. `None` on other platforms/cores, where Xray accepts an
-    /// arbitrary interface name.
+    /// Optional device name to bind the TUN inbound to. On Windows this keeps
+    /// sing-box away from a broken/stale adapter under its default name. On
+    /// macOS, Xray requires a free `utunN` name selected by the caller.
     pub tun_interface_name: Option<String>,
 }
 
@@ -269,7 +266,7 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
         // off on macOS/Linux instead lets traffic silently bypass the tunnel
         // (e.g. via a same-subnet route to the LAN gateway — see the DNS
         // pollution writeup). Enable it on every platform.
-        inbounds.push(json!({
+        let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
             "address": tun_addresses(opts.tun_ipv6),
@@ -278,7 +275,11 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
             "strict_route": true,
             "route_exclude_address": ["127.0.0.0/8", "::1/128"],
             "stack": opts.normalized_tun_stack()
-        }));
+        });
+        if let Some(interface_name) = opts.tun_interface_name.as_deref() {
+            tun["interface_name"] = json!(interface_name);
+        }
+        inbounds.push(tun);
     }
 
     let mut value = json!({
@@ -2473,7 +2474,7 @@ mod tests {
                 tun_ipv6: false,
                 block_quic: false,
                 bypass_lan: false,
-                tun_interface_name: None,
+                tun_interface_name: Some("satelite-self".into()),
             },
         )
         .unwrap();
@@ -2482,6 +2483,7 @@ mod tests {
         assert_eq!(inbounds[1]["type"], "tun");
         assert_eq!(inbounds[1]["auto_route"], true);
         assert_eq!(inbounds[1]["stack"], "mixed");
+        assert_eq!(inbounds[1]["interface_name"], "satelite-self");
         // strict_route must be on on every platform now (problem 5): the
         // Windows-only carve-out is gone, and route_exclude_address below
         // already protects host → 127.0.0.1 (clash_api / mixed) on macOS.

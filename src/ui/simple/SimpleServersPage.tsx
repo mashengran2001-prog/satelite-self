@@ -16,7 +16,10 @@ import {
   testCustomNodesLatency,
   testNodesLatency,
 } from "../../api";
-import { IppureDisplay } from "../../components/IppureDisplay";
+import {
+  IPPURE_DIAGNOSIS_KEYS,
+  IppureDisplay,
+} from "../../components/IppureDisplay";
 import {
   rememberIppureResult,
   rememberIppureResults,
@@ -111,6 +114,8 @@ export function SimpleServersPage() {
     new Map(),
   );
   const [ippureTesting, setIppureTesting] = useState(false);
+  // Batch verdict for a run where every node failed — see NodesPage.
+  const [ippureNotice, setIppureNotice] = useState<string | null>(null);
   const [ippureTestingIds, setIppureTestingIds] = useState<Set<string>>(
     new Set(),
   );
@@ -306,11 +311,16 @@ export function SimpleServersPage() {
     if (ippureTesting || customRuntime || nodeTotal === 0) return;
     setIppureTesting(true);
     setError(null);
+    setIppureNotice(null);
     let unlisten: (() => void) | undefined;
+    let unlistenWarning: (() => void) | undefined;
     try {
       const ids = await listNodeIds();
       const idSet = new Set(ids);
       setIppureTestingIds(idSet);
+      unlistenWarning = await listen("ippure-endpoint-warning", () => {
+        setIppureNotice(t("nodes.ippureEndpointWarning"));
+      });
       // Stream each finished probe so rows stop spinning as results land.
       unlisten = await listen<IppureResult>("ippure-progress", (event) => {
         const r = event.payload;
@@ -334,10 +344,17 @@ export function SimpleServersPage() {
         for (const r of batch.results) next.set(r.id, r);
         return next;
       });
+      // Only set when every node failed, so it explains a fully red list
+      // instead of leaving the user to guess whose fault it was.
+      const key = batch.diagnosis
+        ? IPPURE_DIAGNOSIS_KEYS[batch.diagnosis.code]
+        : undefined;
+      setIppureNotice(key ? t(key) : null);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       unlisten?.();
+      unlistenWarning?.();
       setIppureTesting(false);
       setIppureTestingIds(new Set());
     }
@@ -433,6 +450,21 @@ export function SimpleServersPage() {
 
       {error && (
         <ErrorModal message={error} onClose={() => setError(null)} />
+      )}
+
+      {ippureNotice && (
+        <div className="banner guide ippure-notice" role="status">
+          <span>{ippureNotice}</span>
+          <button
+            type="button"
+            className="banner-dismiss"
+            aria-label={t("common.close")}
+            title={t("common.close")}
+            onClick={() => setIppureNotice(null)}
+          >
+            ×
+          </button>
+        </div>
       )}
 
       {switching && (

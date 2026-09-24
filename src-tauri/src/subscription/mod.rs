@@ -5,6 +5,7 @@ mod json_util;
 mod manual;
 mod singbox;
 mod uri;
+mod v2rayn;
 mod xray;
 mod yaml_util;
 
@@ -12,6 +13,7 @@ pub use clash::parse_clash_yaml;
 pub use manual::{node_to_draft, parse_manual_draft, parse_single_uri};
 pub use singbox::{looks_like_singbox_json, parse_singbox_json, validate_complete_singbox_config};
 pub use uri::parse_uri_list;
+pub use v2rayn::{looks_like_v2rayn_json, parse_v2rayn_json};
 pub use xray::{looks_like_xray_json, parse_xray_json};
 
 use crate::domain::{ParseResult, SubscriptionFormat};
@@ -43,6 +45,12 @@ pub fn parse_subscription(content: &str) -> AppResult<ParseResult> {
     if looks_like_json(trimmed) {
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(value) => {
+                // Checked before Xray: a v2rayN GUI export has no `outbounds`
+                // and no top-level `protocol`, so it would otherwise fall
+                // through every JSON branch and be reported as unparseable.
+                if looks_like_v2rayn_json(&value) {
+                    return parse_v2rayn_json(trimmed);
+                }
                 if looks_like_xray_json(&value) {
                     return parse_xray_json(trimmed);
                 }
@@ -293,5 +301,73 @@ proxies:
         let r = parse_subscription(&b64).unwrap();
         assert_eq!(r.format, SubscriptionFormat::XrayJson);
         assert_eq!(r.nodes[0].name, "SS-1");
+    }
+
+    #[test]
+    fn detect_v2rayn_gui_profile() {
+        // Shape written by v2rayN's own export: every server lives under
+        // `vmess` regardless of protocol, with `configType` naming the real one.
+        let json = r#"{
+          "vmess": [
+            {
+              "configType": 1,
+              "ps": "VM-1",
+              "add": "a.example.com",
+              "port": 443,
+              "id": "11111111-1111-1111-1111-111111111111",
+              "alterId": 0,
+              "net": "ws",
+              "path": "/ray",
+              "host": "cdn.example.com",
+              "streamSecurity": "tls",
+              "sni": "a.example.com"
+            },
+            {
+              "configType": "trojan",
+              "ps": "TJ-1",
+              "add": "b.example.com",
+              "port": 8443,
+              "id": "secret",
+              "streamSecurity": "tls"
+            }
+          ]
+        }"#;
+        let r = parse_subscription(json).unwrap();
+        assert_eq!(r.format, SubscriptionFormat::V2raynJson);
+        assert_eq!(r.nodes.len(), 2);
+        assert_eq!(r.nodes[0].name, "VM-1");
+        assert!(r.nodes[0].tls.as_ref().is_some_and(|t| t.enabled));
+        assert!(matches!(
+            r.nodes[0].transport,
+            Some(crate::domain::Transport::Ws { .. })
+        ));
+        assert_eq!(r.nodes[1].name, "TJ-1");
+        assert!(matches!(
+            r.nodes[1].config,
+            crate::domain::ProtocolConfig::Trojan { .. }
+        ));
+    }
+
+    #[test]
+    fn v2rayn_skips_unsupported_and_keeps_rest() {
+        let json = r#"{
+          "vmess": [
+            {"configType": 99, "ps": "WEIRD", "add": "x.example.com", "port": 1},
+            {"configType": 5, "ps": "VL-1", "add": "c.example.com", "port": 443,
+             "id": "22222222-2222-2222-2222-222222222222", "net": "grpc", "path": "gsvc",
+             "streamSecurity": "reality", "publicKey": "pk", "shortId": "ab"}
+          ]
+        }"#;
+        let r = parse_subscription(json).unwrap();
+        assert_eq!(r.nodes.len(), 1);
+        assert_eq!(r.nodes[0].name, "VL-1");
+        assert_eq!(r.skipped.len(), 1);
+        assert_eq!(
+            r.nodes[0]
+                .tls
+                .as_ref()
+                .and_then(|t| t.reality_public_key.as_deref()),
+            Some("pk")
+        );
     }
 }
