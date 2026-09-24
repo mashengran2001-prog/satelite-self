@@ -833,7 +833,7 @@ fn map_tun_permission_hint(err: &str) -> String {
         || (lower.contains("create adapter") && lower.contains("open existing adapter"))
     {
         format!(
-            "{err}\n\nTUN 虚拟网卡状态冲突。Satelite 将使用独立的 satelite-self 网卡名称避开旧适配器；请重新启动代理。若仍失败，请重启 Windows 后再试。"
+            "{err}\n\nTUN 虚拟网卡状态冲突。Satelite 会在下一次启动自动换用新的会话网卡名，请直接重新启动代理；若持续失败，再重启 Windows。"
         )
     } else if lower.contains("operation not permitted")
         || lower.contains("permission denied")

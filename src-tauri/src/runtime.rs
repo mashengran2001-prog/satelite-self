@@ -17,7 +17,12 @@ use crate::storage::AppStore;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(target_os = "windows")]
+static WINDOWS_TUN_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyStatus {
@@ -1536,14 +1541,35 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         tun_ipv6: store.settings.tun_ipv6_enabled,
         block_quic: store.settings.block_quic,
         bypass_lan: store.settings.bypass_lan,
-        tun_interface_name: if cfg!(target_os = "windows") && store.settings.tun_enabled {
-            // sing-box's default Wintun name can be left in a half-created
-            // state after an older process is killed. A product-specific name
-            // avoids that stale adapter and remains stable across restarts.
-            Some("satelite-self".into())
-        } else {
-            None
-        },
+        tun_interface_name: next_windows_tun_interface_name(store.settings.tun_enabled),
+    }
+}
+
+/// Wintun can keep a just-closed adapter name reserved briefly even after the
+/// elevated core process and its ports have exited. Reusing one fixed name on
+/// an immediate config restart then fails with "file already exists / element
+/// not found". Give every core session a compact unique name so adapter cleanup
+/// never sits on the restart path.
+fn next_windows_tun_interface_name(tun_enabled: bool) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if !tun_enabled {
+            return None;
+        }
+        let sequence = WINDOWS_TUN_SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_micros())
+            .unwrap_or(0);
+        Some(format!(
+            "satelite-{:x}-{micros:x}-{sequence:x}",
+            std::process::id()
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = tun_enabled;
+        None
     }
 }
 
@@ -1946,6 +1972,24 @@ mod tests {
 
         assert!(restart_allowed, "stop must allow an immediate restart");
         assert!(!api.is_active(), "stop must cancel Clash API clients");
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tun_name_tests {
+    use super::next_windows_tun_interface_name;
+
+    #[test]
+    fn each_tun_start_gets_a_short_unique_adapter_name() {
+        assert_eq!(next_windows_tun_interface_name(false), None);
+        let first = next_windows_tun_interface_name(true).unwrap();
+        let second = next_windows_tun_interface_name(true).unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("satelite-"));
+        assert!(second.starts_with("satelite-"));
+        assert!(first.len() <= 48, "adapter name is too long: {first}");
+        assert!(second.len() <= 48, "adapter name is too long: {second}");
     }
 }
 

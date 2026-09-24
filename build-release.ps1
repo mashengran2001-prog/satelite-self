@@ -1,4 +1,4 @@
-# Satelite 1.1.2 Release Build Script
+# Satelite 1.1.3 Release Build Script
 # Run this in a normal PowerShell terminal (outside Claude Code) to avoid session timeout issues.
 
 $ErrorActionPreference = "Stop"
@@ -42,8 +42,8 @@ corepack pnpm exec tauri build --bundles nsis --config src-tauri/tauri.singbox-w
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`nBuild complete!" -ForegroundColor Green
-    Write-Host "Installer: src-tauri\target\release\bundle\nsis\Satelite_1.1.2_x64-setup.exe"
-    Write-Host "Signature: src-tauri\target\release\bundle\nsis\Satelite_1.1.2_x64-setup.exe.sig"
+    Write-Host "Installer: src-tauri\target\release\bundle\nsis\Satelite_1.1.3_x64-setup.exe"
+    Write-Host "Signature: src-tauri\target\release\bundle\nsis\Satelite_1.1.3_x64-setup.exe.sig"
 } else {
     throw "Tauri build failed with exit code $LASTEXITCODE"
 }
