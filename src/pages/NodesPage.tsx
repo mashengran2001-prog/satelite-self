@@ -469,17 +469,25 @@ export function NodesPage() {
     setIppureDone(0);
     setIppureNotice(null);
     let unlisten: (() => void) | undefined;
+    let unlistenStart: (() => void) | undefined;
     let unlistenWarning: (() => void) | undefined;
     try {
       const ids = await listNodeIds(query);
       setIppureTotal(ids.length);
       const idSet = new Set(ids);
-      setIppureTestingIds(idSet);
+      setIppureTestingIds(new Set());
       // Fires before the rows start landing when the backend's control probe
       // could not reach the purity service, so a doomed batch can be stopped
       // early instead of running to the end for nothing.
       unlistenWarning = await listen("ippure-endpoint-warning", () => {
         setIppureNotice(t("nodes.ippureEndpointWarning"));
+      });
+      // Keep cached values visible for queued rows. Only the node actively
+      // using the selector shows a spinner, which avoids a full-list flash.
+      unlistenStart = await listen<string>("ippure-node-start", (event) => {
+        const id = event.payload;
+        if (!idSet.has(id)) return;
+        setIppureTestingIds(new Set([id]));
       });
       // Stream each finished probe so rows stop spinning as results land.
       unlisten = await listen<IppureResult>("ippure-progress", (event) => {
@@ -512,6 +520,7 @@ export function NodesPage() {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       unlisten?.();
+      unlistenStart?.();
       unlistenWarning?.();
       setIppureTesting(false);
       setIppureTestingIds(new Set());

@@ -21,6 +21,7 @@ import {
   IppureDisplay,
 } from "../../components/IppureDisplay";
 import {
+  initializeIppureResults,
   rememberIppureResult,
   rememberIppureResults,
 } from "../../ippureSession";
@@ -111,7 +112,7 @@ export function SimpleServersPage() {
   const [testing, setTesting] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [ippureResults, setIppureResults] = useState<Map<string, IppureResult>>(
-    new Map(),
+    initializeIppureResults,
   );
   const [ippureTesting, setIppureTesting] = useState(false);
   // Batch verdict for a run where every node failed — see NodesPage.
@@ -313,13 +314,19 @@ export function SimpleServersPage() {
     setError(null);
     setIppureNotice(null);
     let unlisten: (() => void) | undefined;
+    let unlistenStart: (() => void) | undefined;
     let unlistenWarning: (() => void) | undefined;
     try {
       const ids = await listNodeIds();
       const idSet = new Set(ids);
-      setIppureTestingIds(idSet);
+      setIppureTestingIds(new Set());
       unlistenWarning = await listen("ippure-endpoint-warning", () => {
         setIppureNotice(t("nodes.ippureEndpointWarning"));
+      });
+      unlistenStart = await listen<string>("ippure-node-start", (event) => {
+        const id = event.payload;
+        if (!idSet.has(id)) return;
+        setIppureTestingIds(new Set([id]));
       });
       // Stream each finished probe so rows stop spinning as results land.
       unlisten = await listen<IppureResult>("ippure-progress", (event) => {
@@ -354,6 +361,7 @@ export function SimpleServersPage() {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       unlisten?.();
+      unlistenStart?.();
       unlistenWarning?.();
       setIppureTesting(false);
       setIppureTestingIds(new Set());

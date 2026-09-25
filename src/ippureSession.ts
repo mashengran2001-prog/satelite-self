@@ -2,7 +2,14 @@ import type { IppureResult } from "./types";
 
 const STORAGE_KEY = "satelite.ippureCache.v1";
 const MAX_CACHE_ITEMS = 3000;
-const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SUCCESS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const FAILURE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+function testedAtMs(testedAt: number): number {
+  // Rust emits Unix seconds. Accept milliseconds too so a future schema change
+  // does not invalidate every existing entry again.
+  return testedAt < 10_000_000_000 ? testedAt * 1000 : testedAt;
+}
 
 function loadIppureCache(): Map<string, IppureResult> {
   const map = new Map<string, IppureResult>();
@@ -19,7 +26,8 @@ function loadIppureCache(): Map<string, IppureResult> {
         typeof r.id !== "string" ||
         typeof r.tested_at !== "number" ||
         !(r.tested_at > 0) ||
-        now - r.tested_at > CACHE_TTL_MS
+        Math.max(0, now - testedAtMs(r.tested_at)) >
+          (r.error ? FAILURE_CACHE_TTL_MS : SUCCESS_CACHE_TTL_MS)
       ) {
         continue;
       }
@@ -84,6 +92,11 @@ export function initializeIppureResults(): Map<string, IppureResult> {
 
 export function rememberIppureResult(result: IppureResult) {
   if (!result?.id) return;
+  putIppureResult(result);
+  persistCache();
+}
+
+function putIppureResult(result: IppureResult) {
   ippureCache.set(result.id, result);
   if (ippureCache.size > MAX_CACHE_ITEMS) {
     const oldest = Array.from(ippureCache.values())
@@ -91,11 +104,16 @@ export function rememberIppureResult(result: IppureResult) {
       .slice(0, ippureCache.size - MAX_CACHE_ITEMS);
     for (const r of oldest) ippureCache.delete(r.id);
   }
-  persistCache();
 }
 
 export function rememberIppureResults(results: Iterable<IppureResult>) {
-  for (const result of results) rememberIppureResult(result);
+  let changed = false;
+  for (const result of results) {
+    if (!result?.id) continue;
+    putIppureResult(result);
+    changed = true;
+  }
+  if (changed) persistCache();
 }
 
 export function getIppureResult(

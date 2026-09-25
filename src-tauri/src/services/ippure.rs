@@ -27,7 +27,19 @@ struct Endpoint {
     /// fallback can still answer "which IP am I exiting from", which is the
     /// other half of what the check is for.
     scores: bool,
+    /// Per-service deadline. The fallback is deliberately shorter so trying it
+    /// after a blocked primary does not double the cost of a dead node.
+    timeout: Duration,
 }
+
+#[cfg(not(test))]
+const PRIMARY_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
+const FALLBACK_HTTP_TIMEOUT: Duration = Duration::from_secs(4);
+#[cfg(test)]
+const PRIMARY_HTTP_TIMEOUT: Duration = Duration::from_millis(180);
+#[cfg(test)]
+const FALLBACK_HTTP_TIMEOUT: Duration = Duration::from_millis(140);
 
 /// Probe endpoints, tried in order.
 ///
@@ -44,11 +56,13 @@ const IPPURE_ENDPOINTS: &[Endpoint] = &[
         url: "https://my.123169.xyz/v1/info",
         label: "IPPure",
         scores: true,
+        timeout: PRIMARY_HTTP_TIMEOUT,
     },
     Endpoint {
         url: "https://ipwho.is/",
         label: "ipwho.is",
         scores: false,
+        timeout: FALLBACK_HTTP_TIMEOUT,
     },
 ];
 /// Time for the selector switch to reach the new outbound before probing.
@@ -57,11 +71,10 @@ const IPPURE_ENDPOINTS: &[Endpoint] = &[
 /// 200ms was too short; cores often reused the previous node's connection.
 const SWITCH_SETTLE_MS: u64 = 500;
 const CLASH_API_TIMEOUT: Duration = Duration::from_secs(2);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(6);
 /// Brief bounded retries for transient local API / endpoint hiccups. They are
 /// intentionally small so a genuinely dead node still fails fast.
-const SELECT_RETRIES: usize = 2;
-const SELECT_RETRY_DELAY: Duration = Duration::from_millis(250);
+const SELECT_RETRIES: usize = 5;
+const SELECT_RETRY_DELAY: Duration = Duration::from_millis(350);
 /// A fresh attempt gives weak nodes a second chance after a reset or a 5xx.
 /// Deliberately *not* used for timeouts — see `is_retryable_http_error`.
 const HTTP_RETRIES: usize = 2;
@@ -288,14 +301,17 @@ fn classify_error_kind(raw_error: &str) -> Option<&'static str> {
 
 /// Probes every node and calls `on_result` for each result as soon as its
 /// probe finishes, so callers can stream per-node progress to the UI.
-pub async fn probe_nodes_ippure_with_progress<F>(
+pub async fn probe_nodes_ippure_with_progress<S, F>(
     nodes: &[ProxyNode],
     api: ClashApi,
     mixed_port: u16,
+    preferred_endpoint: Option<&str>,
     cancel: Option<&AtomicBool>,
+    mut on_start: S,
     mut on_result: F,
 ) -> AppResult<Vec<IppureResult>>
 where
+    S: FnMut(&ProxyNode) + Send,
     F: FnMut(&IppureResult) + Send,
 {
     let original = proxy_group_now_with_retry(&api).await?;
@@ -304,9 +320,25 @@ where
         if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             break;
         }
-        let result = probe_one(mixed_port, &api, node, original.as_deref()).await;
+        on_start(node);
+        let result = probe_one(
+            mixed_port,
+            &api,
+            node,
+            original.as_deref(),
+            preferred_endpoint,
+        )
+        .await;
         on_result(&result);
+        let core_unavailable = result.error_kind.as_deref() == Some("core");
         results.push(result);
+        // When the local Clash API disappears during a core restart, every
+        // subsequent selector PUT would produce the same red row. Stop the
+        // batch after the first diagnostic result instead of flooding the
+        // cache with hundreds of identical failures.
+        if core_unavailable {
+            break;
+        }
     }
     // Belt-and-suspenders restore: every per-node probe already restored.
     if let Some(tag) = original.as_deref() {
@@ -320,6 +352,7 @@ async fn probe_one(
     api: &ClashApi,
     node: &ProxyNode,
     original: Option<&str>,
+    preferred_endpoint: Option<&str>,
 ) -> IppureResult {
     let id = node.id.clone();
     let name = node.name.clone();
@@ -332,7 +365,7 @@ async fn probe_one(
     let outcome = match select_with_retry(api, &tag).await {
         Ok(()) => {
             tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
-            query_ippure_with_retry(mixed_port).await
+            query_ippure_with_retry(mixed_port, preferred_endpoint).await
         }
         Err(error) => Err(error),
     };
@@ -394,11 +427,11 @@ fn describe_http_error(error: &reqwest::Error) -> String {
 
 async fn query_ippure(
     client: &reqwest::Client,
-    endpoint: &str,
+    endpoint: &Endpoint,
 ) -> AppResult<IppureResponse> {
     let response = client
-        .get(endpoint)
-        .timeout(HTTP_TIMEOUT)
+        .get(endpoint.url)
+        .timeout(endpoint.timeout)
         .send()
         .await
         .map_err(|e| AppError::Core(format!("ippure http: {}", describe_http_error(&e))))?;
@@ -408,10 +441,42 @@ async fn query_ippure(
             response.status()
         )));
     }
-    response
+    let parsed = response
         .json::<IppureResponse>()
         .await
-        .map_err(|e| AppError::Core(format!("ippure json: {e}")))
+        .map_err(|e| AppError::Core(format!("ippure json: {e}")))?;
+    validate_response(parsed, endpoint)
+}
+
+fn validate_response(
+    parsed: IppureResponse,
+    endpoint: &Endpoint,
+) -> AppResult<IppureResponse> {
+    if parsed.success == Some(false) {
+        return Err(AppError::Core(format!(
+            "ippure json: {} rejected the request{}",
+            endpoint.label,
+            parsed
+                .message
+                .as_deref()
+                .filter(|message| !message.trim().is_empty())
+                .map(|message| format!(": {message}"))
+                .unwrap_or_default()
+        )));
+    }
+    if parsed
+        .ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+        .is_none()
+    {
+        return Err(AppError::Core(format!(
+            "ippure json: {} returned no IP",
+            endpoint.label
+        )));
+    }
+    Ok(parsed)
 }
 
 /// A selector change can transiently fail while the core is still settling a
@@ -438,45 +503,61 @@ async fn select_with_retry(api: &ClashApi, tag: &str) -> AppResult<()> {
 /// now? Run *without* touching the selector, so it measures the path the user
 /// is already browsing on. Its only job is to tell "your nodes are dead" apart
 /// from "the probe service is unreachable" — see [`diagnose_batch`].
-pub async fn endpoint_reachable(mixed_port: u16) -> bool {
-    query_ippure_with_retry(mixed_port).await.map(|_| ()).is_ok()
+pub async fn available_endpoint(mixed_port: u16) -> Option<String> {
+    query_ippure_with_retry(mixed_port, None)
+        .await
+        .ok()
+        .map(|(_, endpoint)| endpoint.label.to_string())
 }
 
 /// Query the endpoints in order through the node's tunnel.
 ///
-/// Two rules keep a batch from grinding on dead nodes, which used to dominate
-/// the wall clock — a dead node cost two full 6s timeouts (~12.6s) while a
-/// healthy one costs well under 2s:
+/// The primary service is preferred because it provides a fraud score. When it
+/// is blocked by one route, the shorter score-less fallback still recovers the
+/// exit IP and provider instead of misreporting the node as dead.
 ///
-/// 1. A timeout is *terminal*. Waiting 6s already answered the question; a
-///    second 6s wait almost never turns into a result.
-/// 2. Fallback endpoints are only tried when the tunnel demonstrably works
-///    (we got an HTTP status or a parse error back). Walking the list through
-///    a dead tunnel would cost one timeout per endpoint instead of one total.
+/// A timeout is terminal for that service and is never retried. The other
+/// endpoint still gets one bounded attempt because routes can block providers
+/// independently.
 async fn query_ippure_with_retry(
     mixed_port: u16,
+    preferred_endpoint: Option<&str>,
 ) -> AppResult<(IppureResponse, &'static Endpoint)> {
     let mut last_error: Option<AppError> = None;
-    for endpoint in IPPURE_ENDPOINTS {
-        match query_endpoint_with_retry(mixed_port, endpoint.url).await {
+    for endpoint in ordered_endpoints(preferred_endpoint) {
+        match query_endpoint_with_retry(mixed_port, endpoint).await {
             Ok(response) => return Ok((response, endpoint)),
             Err(error) => {
-                let endpoint_answered = tunnel_reached_endpoint(&error);
                 last_error = Some(error);
-                if !endpoint_answered {
-                    break;
-                }
             }
         }
     }
     Err(last_error.expect("endpoint loop always records an error"))
 }
 
+fn ordered_endpoints(preferred_endpoint: Option<&str>) -> Vec<&'static Endpoint> {
+    let mut endpoints = Vec::with_capacity(IPPURE_ENDPOINTS.len());
+    if let Some(preferred) = preferred_endpoint {
+        if let Some(endpoint) = IPPURE_ENDPOINTS
+            .iter()
+            .find(|endpoint| endpoint.label == preferred)
+        {
+            endpoints.push(endpoint);
+        }
+    }
+    for endpoint in IPPURE_ENDPOINTS {
+        if !endpoints.iter().any(|item| item.label == endpoint.label) {
+            endpoints.push(endpoint);
+        }
+    }
+    endpoints
+}
+
 /// One endpoint, with bounded retries for failures that are both transient and
 /// *fast* — a reset or 5xx costs milliseconds, so a second try is cheap.
 async fn query_endpoint_with_retry(
     mixed_port: u16,
-    endpoint: &str,
+    endpoint: &Endpoint,
 ) -> AppResult<IppureResponse> {
     let mut last_error: Option<AppError> = None;
     for attempt in 0..HTTP_RETRIES {
@@ -511,10 +592,10 @@ fn is_transient_clash_error(error: &AppError) -> bool {
 
 /// Worth a second attempt against the *same* endpoint.
 ///
-/// Excludes timeouts on purpose: the attempt already spent the full
-/// `HTTP_TIMEOUT` proving the tunnel does not carry traffic, and repeating it
-/// doubles the cost of every dead node in the batch. Also excludes a refused
-/// connection, which is an immediate, definitive answer.
+/// Excludes timeouts on purpose: the attempt already spent the endpoint's full
+/// deadline, and repeating it doubles the cost of every dead node in the
+/// batch. Also excludes a refused connection, which is an immediate,
+/// definitive answer.
 fn is_retryable_http_error(error: &AppError) -> bool {
     let raw = error.to_string();
     let message = raw.strip_prefix("core error: ").unwrap_or(&raw);
@@ -530,16 +611,6 @@ fn is_retryable_http_error(error: &AppError) -> bool {
         return true;
     }
     response_status(message).is_some_and(|code| code == 429 || (500..600).contains(&code))
-}
-
-/// True when the request actually reached an endpoint and it answered — an
-/// HTTP status or a body we could not parse. Only then is trying the next
-/// endpoint in the list worthwhile; a transport failure is the node's problem
-/// and every other endpoint would fail the same way.
-fn tunnel_reached_endpoint(error: &AppError) -> bool {
-    let raw = error.to_string();
-    let message = raw.strip_prefix("core error: ").unwrap_or(&raw);
-    message.starts_with("ippure json:") || response_status(message).is_some()
 }
 
 fn response_status(message: &str) -> Option<u16> {
@@ -616,6 +687,10 @@ struct IppureConnection {
 
 #[derive(Debug, Clone, Deserialize)]
 struct IppureResponse {
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    message: Option<String>,
     #[serde(default)]
     ip: Option<String>,
     #[serde(
@@ -854,6 +929,21 @@ mod tests {
     }
 
     #[test]
+    fn invalid_service_responses_are_rejected() {
+        let rejected: IppureResponse = serde_json::from_str(
+            r#"{"success":false,"message":"rate limited","ip":"1.2.3.4"}"#,
+        )
+        .expect("parse rejected response");
+        let error = validate_response(rejected, primary_endpoint()).expect_err("must reject");
+        assert!(error.to_string().contains("rate limited"));
+
+        let missing_ip: IppureResponse =
+            serde_json::from_str(r#"{"success":true}"#).expect("parse missing IP response");
+        let error = validate_response(missing_ip, fallback_endpoint()).expect_err("must reject");
+        assert!(error.to_string().contains("returned no IP"));
+    }
+
+    #[test]
     fn fallback_operator_is_flattened_and_tagged() {
         // `ipwho.is` nests the operator under `connection` and returns no
         // score. Both differences are absorbed here so the UI needs no
@@ -977,19 +1067,11 @@ mod tests {
             "ippure http: connection reset by peer".into()
         )));
 
-        // Only an endpoint that actually answered justifies trying the next one.
-        assert!(tunnel_reached_endpoint(&AppError::Core(
-            "ippure http status 503".into()
-        )));
-        assert!(tunnel_reached_endpoint(&AppError::Core(
-            "ippure json: boom".into()
-        )));
-        assert!(!tunnel_reached_endpoint(&AppError::Core(
-            "ippure http: operation timed out".into()
-        )));
-        assert!(!tunnel_reached_endpoint(&AppError::Core(
-            "ippure http: connection reset by peer".into()
-        )));
+        assert_eq!(ordered_endpoints(None)[0].label, primary_endpoint().label);
+        assert_eq!(
+            ordered_endpoints(Some(fallback_endpoint().label))[0].label,
+            fallback_endpoint().label
+        );
     }
 
     fn failed_result(kind: &str) -> IppureResult {
@@ -1131,12 +1213,11 @@ mod tests {
 
     /// The performance fix, asserted on behaviour rather than on a stopwatch.
     ///
-    /// A hung tunnel used to cost two full `HTTP_TIMEOUT` waits per node
-    /// (~12.6s), and walking the fallback endpoints would have cost one wait
-    /// each. Both are bounded by refusing to retry or fall back after a
-    /// timeout, so exactly one connection may reach the proxy.
+    /// A blocked primary now gets one bounded fallback attempt. Timeouts are
+    /// still never retried against the same endpoint, so the upper bound is the
+    /// sum of the two service deadlines rather than retries times endpoints.
     #[tokio::test]
-    async fn a_hung_tunnel_costs_exactly_one_timeout() {
+    async fn a_hung_tunnel_costs_one_attempt_per_endpoint() {
         // Accepts the CONNECT and then never answers — the tunnel equivalent of
         // a dead node that still completes a TCP handshake.
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind blackhole");
@@ -1158,7 +1239,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let outcome = query_ippure_with_retry(port).await;
+        let outcome = query_ippure_with_retry(port, None).await;
         let elapsed = started.elapsed();
         server.abort();
 
@@ -1177,13 +1258,12 @@ mod tests {
         );
         assert_eq!(
             *attempts.lock().expect("attempts"),
-            1,
-            "a timeout must not be retried, and must not walk the endpoint list"
+            IPPURE_ENDPOINTS.len(),
+            "each endpoint gets one attempt, without retrying a timeout"
         );
-        // One timeout, not two, and not one per endpoint.
         assert!(
-            elapsed < HTTP_TIMEOUT * 2,
-            "took {elapsed:?}, expected roughly one {HTTP_TIMEOUT:?} timeout"
+            elapsed < (PRIMARY_HTTP_TIMEOUT + FALLBACK_HTTP_TIMEOUT) * 2,
+            "took {elapsed:?}, expected one bounded attempt per endpoint"
         );
     }
 
@@ -1206,9 +1286,17 @@ mod tests {
         let api = ClashApi::new("127.0.0.1", port, "test");
         // Port 1 is nothing but a fast connection-refused target: every probe
         // fails, which is exactly what this test needs to exercise restore.
-        let results = probe_nodes_ippure_with_progress(&[node("a"), node("b")], api, 1, None, |_| {})
-            .await
-            .expect("probe batch");
+        let results = probe_nodes_ippure_with_progress(
+            &[node("a"), node("b")],
+            api,
+            1,
+            None,
+            None,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .expect("probe batch");
         server.abort();
 
         assert_eq!(results.len(), 2);

@@ -1,17 +1,10 @@
-# Satelite 1.1.4 Release Build Script
+# Satelite 1.1.5 Release Build Script
 # Run this in a normal PowerShell terminal (outside Claude Code) to avoid session timeout issues.
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $defaultSigningKey = Join-Path $HOME ".satelite-updater\satelite.key"
-if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and (Test-Path $defaultSigningKey)) {
-    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $defaultSigningKey -Raw
-    if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-    }
-}
-
 Write-Host "Step 1/4: Building frontend..." -ForegroundColor Cyan
 corepack pnpm run build
 if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
@@ -51,12 +44,21 @@ foreach ($s in $sets) {
 
 Write-Host "`nStep 4/4: Building signed installer (this will take 15-20 minutes)..." -ForegroundColor Cyan
 Write-Host "Compiling Rust dependencies and bundling NSIS installer..." -ForegroundColor Gray
-corepack pnpm exec tauri build --bundles nsis --config src-tauri/tauri.singbox-windows.conf.json
+corepack pnpm exec tauri build --bundles nsis --config src-tauri/tauri.singbox-windows.conf.json --config src-tauri/tauri.manual-updater-signing.conf.json
 
 if ($LASTEXITCODE -eq 0) {
+    $installer = "src-tauri\target\release\bundle\nsis\Satelite_1.1.5_x64-setup.exe"
+    if (-not (Test-Path $defaultSigningKey)) {
+        throw "Updater signing key not found: $defaultSigningKey"
+    }
+    # An empty password cannot be preserved as a Windows environment variable.
+    # Pass it explicitly so Tauri does not wait forever for an interactive prompt.
+    corepack pnpm exec tauri signer sign --private-key-path $defaultSigningKey --password= $installer
+    if ($LASTEXITCODE -ne 0) { throw "Updater signing failed" }
+
     Write-Host "`nBuild complete!" -ForegroundColor Green
-    Write-Host "Installer: src-tauri\target\release\bundle\nsis\Satelite_1.1.4_x64-setup.exe"
-    Write-Host "Signature: src-tauri\target\release\bundle\nsis\Satelite_1.1.4_x64-setup.exe.sig"
+    Write-Host "Installer: $installer"
+    Write-Host "Signature: $installer.sig"
 } else {
     throw "Tauri build failed with exit code $LASTEXITCODE"
 }

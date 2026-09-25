@@ -1,5 +1,5 @@
 use crate::services::ippure::{
-    diagnose_batch, endpoint_reachable, probe_nodes_ippure_with_progress, IppureDiagnosis,
+    available_endpoint, diagnose_batch, probe_nodes_ippure_with_progress, IppureDiagnosis,
     IppureResult,
 };
 use crate::state::AppState;
@@ -7,8 +7,8 @@ use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
-/// Above this batch size, spend ~1s up front checking the probe endpoint over
-/// the current selection and warn the user immediately if it looks unreachable.
+/// Above this batch size, run one bounded check of the probe endpoints over the
+/// current selection and warn the user if both look unreachable.
 /// Below it, the check is not worth the added latency — the batch finishes in
 /// about the same time it would take, and the diagnosis still runs at the end.
 const PREFLIGHT_MIN_NODES: usize = 5;
@@ -123,10 +123,11 @@ pub async fn test_nodes_ippure(
     // fine — but a failure here is worth surfacing before the user waits out a
     // long run that is going to fail on every row.
     let mut control_ok: Option<bool> = None;
+    let mut preferred_endpoint: Option<String> = None;
     if nodes.len() >= PREFLIGHT_MIN_NODES {
-        let reachable = endpoint_reachable(mixed_port).await;
-        control_ok = Some(reachable);
-        if !reachable {
+        preferred_endpoint = available_endpoint(mixed_port).await;
+        control_ok = Some(preferred_endpoint.is_some());
+        if preferred_endpoint.is_none() {
             let _ = app.emit("ippure-endpoint-warning", ());
         }
     }
@@ -135,10 +136,15 @@ pub async fn test_nodes_ippure(
         &nodes,
         api,
         mixed_port,
+        preferred_endpoint.as_deref(),
         Some(state.ippure_cancel_flag()),
+        |node| {
+            let _ = app.emit("ippure-node-start", node.id.clone());
+        },
         |result| {
-        let _ = app.emit("ippure-progress", result.clone());
-    })
+            let _ = app.emit("ippure-progress", result.clone());
+        },
+    )
     .await
     .map_err(|e| e.to_string())?;
 
@@ -149,13 +155,34 @@ pub async fn test_nodes_ippure(
     // preflight was skipped). One probe now is what separates "your nodes are
     // dead" from "the probe service is unreachable".
     if ok == 0 && results.len() >= DIAGNOSE_MIN_NODES && control_ok.is_none() {
-        control_ok = Some(endpoint_reachable(mixed_port).await);
+        control_ok = Some(available_endpoint(mixed_port).await.is_some());
     }
     let diagnosis = if results.len() >= DIAGNOSE_MIN_NODES {
         diagnose_batch(&results, control_ok)
     } else {
         None
     };
+
+    let failure_kinds = results
+        .iter()
+        .filter_map(|result| result.error_kind.as_deref())
+        .fold(
+            std::collections::BTreeMap::<&str, usize>::new(),
+            |mut counts, kind| {
+                *counts.entry(kind).or_default() += 1;
+                counts
+            },
+        );
+    crate::app_log::info(
+        "ippure",
+        format!(
+            "batch tested={} ok={} failed={} endpoint={} failure_kinds={failure_kinds:?}",
+            results.len(),
+            ok,
+            failed,
+            preferred_endpoint.as_deref().unwrap_or("auto")
+        ),
+    );
 
     Ok(IppureBatchResult {
         tested: results.len(),
