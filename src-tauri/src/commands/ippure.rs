@@ -123,11 +123,11 @@ pub async fn test_nodes_ippure(
     // fine — but a failure here is worth surfacing before the user waits out a
     // long run that is going to fail on every row.
     let mut control_ok: Option<bool> = None;
-    let mut preferred_endpoint: Option<String> = None;
+    let mut control_endpoint: Option<String> = None;
     if nodes.len() >= PREFLIGHT_MIN_NODES {
-        preferred_endpoint = available_endpoint(mixed_port).await;
-        control_ok = Some(preferred_endpoint.is_some());
-        if preferred_endpoint.is_none() {
+        control_endpoint = available_endpoint(mixed_port).await;
+        control_ok = Some(control_endpoint.is_some());
+        if control_endpoint.is_none() {
             let _ = app.emit("ippure-endpoint-warning", ());
         }
     }
@@ -136,7 +136,6 @@ pub async fn test_nodes_ippure(
         &nodes,
         api,
         mixed_port,
-        preferred_endpoint.as_deref(),
         Some(state.ippure_cancel_flag()),
         |node| {
             let _ = app.emit("ippure-node-start", node.id.clone());
@@ -176,11 +175,11 @@ pub async fn test_nodes_ippure(
     crate::app_log::info(
         "ippure",
         format!(
-            "batch tested={} ok={} failed={} endpoint={} failure_kinds={failure_kinds:?}",
+            "batch tested={} ok={} failed={} control_endpoint={} failure_kinds={failure_kinds:?}",
             results.len(),
             ok,
             failed,
-            preferred_endpoint.as_deref().unwrap_or("auto")
+            control_endpoint.as_deref().unwrap_or("none")
         ),
     );
 

@@ -13,20 +13,23 @@ use crate::domain::ProxyNode;
 use crate::error::{AppError, AppResult};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// One probe service.
 #[derive(Debug)]
 struct Endpoint {
     url: &'static str,
-    /// Short name shown on a row so a missing score explains itself.
+    /// Short name shown on a row for non-primary scoring sources.
     label: &'static str,
-    /// Whether this service returns a fraud score. Only the primary does; a
-    /// fallback can still answer "which IP am I exiting from", which is the
-    /// other half of what the check is for.
+    /// A successful response from this endpoint must include a fraud score.
     scores: bool,
+    /// Whether the UI should identify this source next to the score.
+    show_source: bool,
     /// Per-service deadline. The fallback is deliberately shorter so trying it
     /// after a blocked primary does not double the cost of a dead node.
     timeout: Duration,
@@ -45,8 +48,8 @@ const FALLBACK_HTTP_TIMEOUT: Duration = Duration::from_millis(140);
 ///
 /// A single hard-coded host is a single point of failure: when it goes down or
 /// gets blocked, every node in a batch fails identically and it reads as "all
-/// my nodes are broken". The fallback keeps the exit-IP answer working in that
-/// case, clearly marked as score-less rather than silently degraded.
+/// my nodes are broken". The fallback first resolves the exit IP, then asks a
+/// separate risk service for a real 0-100 score.
 ///
 /// Candidates are checked for actually working without an API key —
 /// `ipinfo.io` and `ipapi.co` both return 429 to unauthenticated callers now,
@@ -56,15 +59,27 @@ const IPPURE_ENDPOINTS: &[Endpoint] = &[
         url: "https://my.123169.xyz/v1/info",
         label: "IPPure",
         scores: true,
+        show_source: false,
         timeout: PRIMARY_HTTP_TIMEOUT,
     },
     Endpoint {
         url: "https://ipwho.is/",
         label: "ipwho.is",
         scores: false,
+        show_source: true,
         timeout: FALLBACK_HTTP_TIMEOUT,
     },
 ];
+const PROXYCHECK_SOURCE: Endpoint = Endpoint {
+    url: "https://proxycheck.io/v2/",
+    label: "proxycheck.io",
+    scores: true,
+    show_source: true,
+    timeout: FALLBACK_HTTP_TIMEOUT,
+};
+const SCORE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_SCORE_CACHE_ITEMS: usize = 2_000;
+static SCORE_CACHE: OnceLock<Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
 /// Time for the selector switch to reach the new outbound before probing.
 /// Wait after switching the `proxy` selector so the core closes old outbound
 /// connections and the next HTTP request uses the newly selected node's path.
@@ -101,9 +116,7 @@ pub struct IppureResult {
     pub error_kind: Option<String>,
     pub tested_at: i64,
     pub method: String,
-    /// Which service answered, e.g. `IPPure` or `ipwho.is`. Set only when a
-    /// fallback answered, so the UI can say why a row has an IP but no score
-    /// instead of looking like the score silently went missing.
+    /// Which non-primary scoring service answered, e.g. `proxycheck.io`.
     pub source: Option<String>,
 }
 
@@ -145,7 +158,7 @@ impl IppureResult {
             method: "ippure".into(),
             // Only tag fallbacks: tagging the primary would put a redundant
             // badge on every normal row.
-            source: (!endpoint.scores).then(|| endpoint.label.to_string()),
+            source: endpoint.show_source.then(|| endpoint.label.to_string()),
         }
     }
 
@@ -305,7 +318,6 @@ pub async fn probe_nodes_ippure_with_progress<S, F>(
     nodes: &[ProxyNode],
     api: ClashApi,
     mixed_port: u16,
-    preferred_endpoint: Option<&str>,
     cancel: Option<&AtomicBool>,
     mut on_start: S,
     mut on_result: F,
@@ -321,14 +333,7 @@ where
             break;
         }
         on_start(node);
-        let result = probe_one(
-            mixed_port,
-            &api,
-            node,
-            original.as_deref(),
-            preferred_endpoint,
-        )
-        .await;
+        let result = probe_one(mixed_port, &api, node, original.as_deref()).await;
         on_result(&result);
         let core_unavailable = result.error_kind.as_deref() == Some("core");
         results.push(result);
@@ -352,7 +357,6 @@ async fn probe_one(
     api: &ClashApi,
     node: &ProxyNode,
     original: Option<&str>,
-    preferred_endpoint: Option<&str>,
 ) -> IppureResult {
     let id = node.id.clone();
     let name = node.name.clone();
@@ -365,7 +369,7 @@ async fn probe_one(
     let outcome = match select_with_retry(api, &tag).await {
         Ok(()) => {
             tokio::time::sleep(Duration::from_millis(SWITCH_SETTLE_MS)).await;
-            query_ippure_with_retry(mixed_port, preferred_endpoint).await
+            query_ippure_with_retry(mixed_port).await
         }
         Err(error) => Err(error),
     };
@@ -476,6 +480,12 @@ fn validate_response(
             endpoint.label
         )));
     }
+    if endpoint.scores && parsed.fraud_score.is_none() {
+        return Err(AppError::Core(format!(
+            "ippure json: {} returned no fraud score",
+            endpoint.label
+        )));
+    }
     Ok(parsed)
 }
 
@@ -504,7 +514,7 @@ async fn select_with_retry(api: &ClashApi, tag: &str) -> AppResult<()> {
 /// is already browsing on. Its only job is to tell "your nodes are dead" apart
 /// from "the probe service is unreachable" — see [`diagnose_batch`].
 pub async fn available_endpoint(mixed_port: u16) -> Option<String> {
-    query_ippure_with_retry(mixed_port, None)
+    query_ippure_with_retry(mixed_port)
         .await
         .ok()
         .map(|(_, endpoint)| endpoint.label.to_string())
@@ -513,44 +523,125 @@ pub async fn available_endpoint(mixed_port: u16) -> Option<String> {
 /// Query the endpoints in order through the node's tunnel.
 ///
 /// The primary service is preferred because it provides a fraud score. When it
-/// is blocked by one route, the shorter score-less fallback still recovers the
-/// exit IP and provider instead of misreporting the node as dead.
+/// is blocked by one route, ipwho.is resolves the exit IP and proxycheck.io
+/// supplies an independent 0-100 risk score for that IP.
 ///
 /// A timeout is terminal for that service and is never retried. The other
 /// endpoint still gets one bounded attempt because routes can block providers
 /// independently.
 async fn query_ippure_with_retry(
     mixed_port: u16,
-    preferred_endpoint: Option<&str>,
 ) -> AppResult<(IppureResponse, &'static Endpoint)> {
-    let mut last_error: Option<AppError> = None;
-    for endpoint in ordered_endpoints(preferred_endpoint) {
-        match query_endpoint_with_retry(mixed_port, endpoint).await {
-            Ok(response) => return Ok((response, endpoint)),
-            Err(error) => {
-                last_error = Some(error);
-            }
-        }
+    if let Ok(response) = query_endpoint_with_retry(mixed_port, &IPPURE_ENDPOINTS[0]).await {
+        return Ok((response, &IPPURE_ENDPOINTS[0]));
     }
-    Err(last_error.expect("endpoint loop always records an error"))
+
+    let mut response = query_endpoint_with_retry(mixed_port, &IPPURE_ENDPOINTS[1]).await?;
+    let ip = response
+        .ip
+        .as_deref()
+        .expect("validated fallback response always contains an IP");
+    response.fraud_score = Some(query_proxycheck_score_with_retry(mixed_port, ip).await?);
+    Ok((response, &PROXYCHECK_SOURCE))
 }
 
-fn ordered_endpoints(preferred_endpoint: Option<&str>) -> Vec<&'static Endpoint> {
-    let mut endpoints = Vec::with_capacity(IPPURE_ENDPOINTS.len());
-    if let Some(preferred) = preferred_endpoint {
-        if let Some(endpoint) = IPPURE_ENDPOINTS
-            .iter()
-            .find(|endpoint| endpoint.label == preferred)
-        {
-            endpoints.push(endpoint);
+fn cached_proxycheck_score(ip: &str) -> Option<u32> {
+    let cache = SCORE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().ok()?;
+    let now = Instant::now();
+    cache.retain(|_, (_, stored_at)| now.duration_since(*stored_at) <= SCORE_CACHE_TTL);
+    cache.get(ip).map(|(score, _)| *score)
+}
+
+fn remember_proxycheck_score(ip: String, score: u32) {
+    let cache = SCORE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    if cache.len() >= MAX_SCORE_CACHE_ITEMS {
+        cache.retain(|_, (_, stored_at)| stored_at.elapsed() <= SCORE_CACHE_TTL);
+        if cache.len() >= MAX_SCORE_CACHE_ITEMS {
+            cache.clear();
         }
     }
-    for endpoint in IPPURE_ENDPOINTS {
-        if !endpoints.iter().any(|item| item.label == endpoint.label) {
-            endpoints.push(endpoint);
+    cache.insert(ip, (score, Instant::now()));
+}
+
+async fn query_proxycheck_score_with_retry(mixed_port: u16, ip: &str) -> AppResult<u32> {
+    let canonical_ip = ip
+        .parse::<IpAddr>()
+        .map_err(|_| AppError::Core(format!("ippure json: invalid exit IP {ip}")))?
+        .to_string();
+    if let Some(score) = cached_proxycheck_score(&canonical_ip) {
+        return Ok(score);
+    }
+
+    let mut last_error: Option<AppError> = None;
+    for attempt in 0..HTTP_RETRIES {
+        let client = ippure_client(mixed_port)?;
+        match query_proxycheck_score(&client, &canonical_ip).await {
+            Ok(score) => {
+                remember_proxycheck_score(canonical_ip, score);
+                return Ok(score);
+            }
+            Err(error) if is_retryable_http_error(&error) => {
+                last_error = Some(error);
+                if attempt + 1 == HTTP_RETRIES {
+                    break;
+                }
+                tokio::time::sleep(HTTP_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
         }
     }
-    endpoints
+    Err(last_error.expect("retry loop always records a transient error"))
+}
+
+async fn query_proxycheck_score(client: &reqwest::Client, ip: &str) -> AppResult<u32> {
+    let url = format!("{}{ip}?vpn=1&asn=1&risk=1", PROXYCHECK_SOURCE.url);
+    let response = client
+        .get(url)
+        .timeout(PROXYCHECK_SOURCE.timeout)
+        .send()
+        .await
+        .map_err(|e| AppError::Core(format!("ippure http: {}", describe_http_error(&e))))?;
+    if !response.status().is_success() {
+        return Err(AppError::Core(format!(
+            "ippure http status {}",
+            response.status()
+        )));
+    }
+    let parsed = response
+        .json::<ProxycheckResponse>()
+        .await
+        .map_err(|e| AppError::Core(format!("ippure json: proxycheck.io: {e}")))?;
+    proxycheck_risk(parsed, ip)
+}
+
+fn proxycheck_risk(parsed: ProxycheckResponse, ip: &str) -> AppResult<u32> {
+    if !parsed.status.eq_ignore_ascii_case("ok") {
+        let message = parsed.message.unwrap_or_else(|| "request rejected".into());
+        if message.to_ascii_lowercase().contains("limit") {
+            return Err(AppError::Core("ippure http status 429".into()));
+        }
+        return Err(AppError::Core(format!(
+            "ippure json: proxycheck.io rejected the request: {message}"
+        )));
+    }
+    let entry = parsed
+        .entries
+        .get(ip)
+        .or_else(|| parsed.entries.values().next())
+        .ok_or_else(|| AppError::Core("ippure json: proxycheck.io returned no IP result".into()))?;
+    let score = entry
+        .risk
+        .ok_or_else(|| AppError::Core("ippure json: proxycheck.io returned no risk score".into()))?;
+    if score > 100 {
+        return Err(AppError::Core(format!(
+            "ippure json: proxycheck.io returned invalid risk score {score}"
+        )));
+    }
+    Ok(score)
 }
 
 /// One endpoint, with bounded retries for failures that are both transient and
@@ -683,6 +774,21 @@ struct IppureConnection {
     org: Option<String>,
     #[serde(default)]
     isp: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProxycheckResponse {
+    status: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(flatten)]
+    entries: HashMap<String, ProxycheckEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProxycheckEntry {
+    #[serde(default, deserialize_with = "deserialize_u32")]
+    risk: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -941,6 +1047,27 @@ mod tests {
             serde_json::from_str(r#"{"success":true}"#).expect("parse missing IP response");
         let error = validate_response(missing_ip, fallback_endpoint()).expect_err("must reject");
         assert!(error.to_string().contains("returned no IP"));
+
+        let missing_score: IppureResponse =
+            serde_json::from_str(r#"{"ip":"1.2.3.4"}"#).expect("parse missing score");
+        let error = validate_response(missing_score, primary_endpoint()).expect_err("must reject");
+        assert!(error.to_string().contains("returned no fraud score"));
+    }
+
+    #[test]
+    fn proxycheck_response_supplies_a_real_risk_score() {
+        let parsed: ProxycheckResponse = serde_json::from_str(
+            r#"{"status":"ok","8.8.8.8":{"proxy":"no","risk":37}}"#,
+        )
+        .expect("parse proxycheck response");
+        assert_eq!(proxycheck_risk(parsed, "8.8.8.8").expect("risk"), 37);
+
+        let limited: ProxycheckResponse = serde_json::from_str(
+            r#"{"status":"denied","message":"Daily query limit exhausted"}"#,
+        )
+        .expect("parse limited response");
+        let error = proxycheck_risk(limited, "8.8.8.8").expect_err("must reject");
+        assert_eq!(classify_error_kind(&error.to_string()), Some("limited"));
     }
 
     #[test]
@@ -1067,11 +1194,8 @@ mod tests {
             "ippure http: connection reset by peer".into()
         )));
 
-        assert_eq!(ordered_endpoints(None)[0].label, primary_endpoint().label);
-        assert_eq!(
-            ordered_endpoints(Some(fallback_endpoint().label))[0].label,
-            fallback_endpoint().label
-        );
+        assert_eq!(IPPURE_ENDPOINTS[0].label, primary_endpoint().label);
+        assert_eq!(IPPURE_ENDPOINTS[1].label, fallback_endpoint().label);
     }
 
     fn failed_result(kind: &str) -> IppureResult {
@@ -1239,7 +1363,7 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let outcome = query_ippure_with_retry(port, None).await;
+        let outcome = query_ippure_with_retry(port).await;
         let elapsed = started.elapsed();
         server.abort();
 
@@ -1290,7 +1414,6 @@ mod tests {
             &[node("a"), node("b")],
             api,
             1,
-            None,
             None,
             |_| {},
             |_| {},

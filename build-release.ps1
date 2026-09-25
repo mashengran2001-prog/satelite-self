@@ -1,4 +1,4 @@
-# Satelite 1.1.5 Release Build Script
+# Satelite 1.1.6 Release Build Script
 # Run this in a normal PowerShell terminal (outside Claude Code) to avoid session timeout issues.
 
 $ErrorActionPreference = "Stop"
@@ -47,7 +47,7 @@ Write-Host "Compiling Rust dependencies and bundling NSIS installer..." -Foregro
 corepack pnpm exec tauri build --bundles nsis --config src-tauri/tauri.singbox-windows.conf.json --config src-tauri/tauri.manual-updater-signing.conf.json
 
 if ($LASTEXITCODE -eq 0) {
-    $installer = "src-tauri\target\release\bundle\nsis\Satelite_1.1.5_x64-setup.exe"
+    $installer = "src-tauri\target\release\bundle\nsis\Satelite_1.1.6_x64-setup.exe"
     if (-not (Test-Path $defaultSigningKey)) {
         throw "Updater signing key not found: $defaultSigningKey"
     }

@@ -149,13 +149,11 @@ export function IppureDisplay({
   const score = result.fraud_score;
   const geo = result.country_code ?? result.country ?? "";
   const scoreLabel = score != null ? String(score) : "?";
-  // When a fallback answered, show its name instead of the score (which it
-  // doesn't provide) so the row reads "IP · ipwho.is · white" instead of
-  // looking like the score silently went missing.
-  const displayLabel = result.source ?? scoreLabel;
+  // Name a fallback scoring source so users know why its score may differ
+  // from IPPure while keeping the same 0-100 display.
   const label = compact
-    ? `${displayLabel} ${riskLabel}`
-    : [result.ip ?? (geo || "IP"), displayLabel, riskLabel]
+    ? [scoreLabel, result.source, riskLabel].filter(Boolean).join(" · ")
+    : [result.ip ?? (geo || "IP"), scoreLabel, result.source, riskLabel]
         .filter(Boolean)
         .join(" · ");
   const nature = ippureNatureKey(result);

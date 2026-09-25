@@ -26,6 +26,7 @@ function loadIppureCache(): Map<string, IppureResult> {
         typeof r.id !== "string" ||
         typeof r.tested_at !== "number" ||
         !(r.tested_at > 0) ||
+        (!r.error && typeof r.fraud_score !== "number") ||
         Math.max(0, now - testedAtMs(r.tested_at)) >
           (r.error ? FAILURE_CACHE_TTL_MS : SUCCESS_CACHE_TTL_MS)
       ) {
