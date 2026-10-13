@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Supported outbound protocols for MVP.
@@ -199,7 +199,11 @@ pub enum ProtocolConfig {
     },
     Vless {
         uuid: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_vless_flow"
+        )]
         flow: Option<String>,
         #[serde(default = "default_vless_packet_encoding")]
         packet_encoding: String,
@@ -316,6 +320,34 @@ pub enum ProtocolConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         mode: Option<String>,
     },
+}
+
+/// Normalize provider-specific and legacy VLESS flow spellings.
+///
+/// Some subscription aggregators append `-udp443` more than once. Current
+/// sing-box only accepts the canonical `xtls-rprx-vision` value, so retaining
+/// that suffix would make the entire generated config fail validation.
+pub fn normalize_vless_flow(flow: Option<String>) -> Option<String> {
+    let flow = flow?.trim().to_string();
+    if flow.is_empty() || flow.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    let lower = flow.to_ascii_lowercase();
+    if lower == "xtls-rprx-vision" || lower.starts_with("xtls-rprx-vision-") {
+        return Some("xtls-rprx-vision".into());
+    }
+
+    Some(flow)
+}
+
+fn deserialize_vless_flow<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(normalize_vless_flow(Option::<String>::deserialize(
+        deserializer,
+    )?))
 }
 
 fn default_vmess_security() -> String {
@@ -610,4 +642,41 @@ pub struct ManualNodeDraft {
     pub service_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_provider_specific_vision_flow_suffixes() {
+        assert_eq!(
+            normalize_vless_flow(Some("xtls-rprx-vision-udp443-udp443".into())).as_deref(),
+            Some("xtls-rprx-vision")
+        );
+        assert_eq!(
+            normalize_vless_flow(Some(" XTLS-RPRX-VISION-UDP443 ".into())).as_deref(),
+            Some("xtls-rprx-vision")
+        );
+        assert_eq!(normalize_vless_flow(Some("none".into())), None);
+        assert_eq!(
+            normalize_vless_flow(Some("xtls-rprx-visionary".into())).as_deref(),
+            Some("xtls-rprx-visionary")
+        );
+    }
+
+    #[test]
+    fn deserializing_stored_vless_config_repairs_legacy_flow() {
+        let config: ProtocolConfig = serde_json::from_str(
+            r#"{"protocol":"vless","uuid":"test","flow":"xtls-rprx-vision-udp443-udp443"}"#,
+        )
+        .unwrap();
+
+        match config {
+            ProtocolConfig::Vless { flow, .. } => {
+                assert_eq!(flow.as_deref(), Some("xtls-rprx-vision"));
+            }
+            _ => panic!("expected vless config"),
+        }
+    }
 }

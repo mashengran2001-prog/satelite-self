@@ -1,8 +1,8 @@
 //! Parse proxy share URIs: ss://, vmess://, vless://, trojan://, hysteria2://, tuic://, anytls://, snell://
 
 use crate::domain::{
-    ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy, SubscriptionFormat, TlsConfig,
-    Transport,
+    normalize_vless_flow, ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy,
+    SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use base64::{engine::general_purpose, Engine as _};
@@ -627,7 +627,7 @@ fn parse_vless_uri(line: &str) -> Result<ProxyNode, String> {
         udp: None,
         config: ProtocolConfig::Vless {
             uuid,
-            flow: query.get("flow").cloned().filter(|s| !s.is_empty()),
+            flow: normalize_vless_flow(query.get("flow").cloned()),
             packet_encoding: "xudp".into(),
         },
         source: Some("vless".into()),

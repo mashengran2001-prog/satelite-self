@@ -176,8 +176,9 @@ export function SimpleConnectPage({ onGoServers, onGoTraffic }: Props) {
         setProxy(await stopProxy());
         await reload();
       } else {
-        const enableSys = proxy?.system_proxy ?? true;
-        setProxy(await startProxy(enableSys));
+        // Match the tray and full dashboard: manual start promotes capture
+        // Off to System, while the backend preserves saved System/TUN modes.
+        setProxy(await startProxy(true));
         await reload();
         const id = node?.id;
         if (id) void probeCurrent(id);

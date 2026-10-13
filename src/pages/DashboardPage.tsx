@@ -461,7 +461,10 @@ function coreDisplayName(kind: string | null | undefined): string {
     setBusy(true);
     setError(null);
     try {
-      const s = await startProxy(false);
+      // A manual "start proxy" action must actually route desktop traffic.
+      // The backend preserves an existing TUN/System preference and only
+      // promotes an Off preference to System when this flag is true.
+      const s = await startProxy(true);
       setProxy(s);
       setStatusReady(true);
       void reload();

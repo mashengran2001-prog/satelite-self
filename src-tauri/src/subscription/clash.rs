@@ -1,8 +1,8 @@
 //! Parse Clash YAML `proxies:` list into normalized [`ProxyNode`]s.
 
 use crate::domain::{
-    ParseResult, Protocol, ProtocolConfig, ProxyNode, ShadowTlsOpts, SkippedProxy,
-    SubscriptionFormat, TlsConfig, Transport,
+    normalize_vless_flow, ParseResult, Protocol, ProtocolConfig, ProxyNode, ShadowTlsOpts,
+    SkippedProxy, SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use crate::subscription::yaml_util::{
@@ -340,7 +340,7 @@ fn parse_vless(
     map: &serde_yaml::Mapping,
 ) -> Result<(Option<TlsConfig>, Option<Transport>, ProtocolConfig), String> {
     let uuid = get_str(map, &["uuid", "id"]).ok_or_else(|| "vless: missing uuid".to_string())?;
-    let flow = get_str(map, &["flow"]);
+    let flow = normalize_vless_flow(get_str(map, &["flow"]));
     let packet_encoding =
         get_str(map, &["packet-encoding", "packet_encoding"]).unwrap_or_else(|| "xudp".into());
 
@@ -1018,6 +1018,26 @@ proxies:
         }
 
         assert!(result.nodes.iter().all(|n| !n.id.is_empty()));
+    }
+
+    #[test]
+    fn normalizes_legacy_vless_flow_from_clash_subscription() {
+        let yaml = r#"
+proxies:
+  - name: "Legacy-VLESS"
+    type: vless
+    server: vl.example.com
+    port: 443
+    uuid: 22222222-2222-2222-2222-222222222222
+    flow: xtls-rprx-vision-udp443-udp443
+"#;
+        let result = parse_clash_yaml(yaml).unwrap();
+        match &result.nodes[0].config {
+            ProtocolConfig::Vless { flow, .. } => {
+                assert_eq!(flow.as_deref(), Some("xtls-rprx-vision"));
+            }
+            _ => panic!("expected vless config"),
+        }
     }
 
     #[test]

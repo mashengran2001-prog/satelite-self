@@ -8,8 +8,8 @@
 //! someone migrates off v2rayN.
 
 use crate::domain::{
-    ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy, SubscriptionFormat, TlsConfig,
-    Transport,
+    normalize_vless_flow, ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy,
+    SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use crate::subscription::json_util::{as_object, get_str, get_u16, get_u32};
@@ -143,7 +143,7 @@ fn parse_protocol(
                 Protocol::Vless,
                 ProtocolConfig::Vless {
                     uuid,
-                    flow: get_str(map, &["flow"]).filter(|f| !f.is_empty()),
+                    flow: normalize_vless_flow(get_str(map, &["flow"])),
                     packet_encoding: "xudp".into(),
                 },
             ))

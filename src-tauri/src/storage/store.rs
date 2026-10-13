@@ -76,6 +76,7 @@ impl AppStore {
         store.migrate_remove_general_rule_set();
         store.migrate_system_rule_set_ids();
         store.migrate_file_sources_to_copied_text();
+        store.prune_remote_remark_nodes();
         store.ensure_subscription_enable_policy();
         if schema_before < 5 && source_raw.is_some() {
             let backup = path.with_file_name("store.pre-v5.backup.json");
@@ -728,6 +729,37 @@ impl AppStore {
                 }
             }
         }
+    }
+
+    /// Keep persisted subscriptions aligned with the importer as its metadata
+    /// detection improves. This also repairs existing stores without requiring
+    /// users to delete and re-add a subscription.
+    fn prune_remote_remark_nodes(&mut self) {
+        let remote_ids: std::collections::HashSet<String> = self
+            .subscriptions
+            .iter()
+            .filter(|subscription| subscription.source.is_remote())
+            .map(|subscription| subscription.id.clone())
+            .collect();
+        if remote_ids.is_empty() {
+            return;
+        }
+
+        self.nodes.retain(|stored| {
+            !remote_ids.contains(stored.subscription_id.as_str())
+                || !crate::services::import::is_remark_name(&stored.node.name)
+        });
+
+        for subscription in &mut self.subscriptions {
+            if remote_ids.contains(subscription.id.as_str()) {
+                subscription.node_count = self
+                    .nodes
+                    .iter()
+                    .filter(|stored| stored.subscription_id == subscription.id)
+                    .count() as u32;
+            }
+        }
+        self.ensure_current_node_valid();
     }
 
     pub fn enabled_nodes(&self) -> Vec<ProxyNode> {
@@ -2052,6 +2084,28 @@ mod tests {
                 latency_at: None,
             },
         }
+    }
+
+    #[test]
+    fn persisted_remote_announcement_nodes_are_pruned_and_selection_is_repaired() {
+        let mut store = AppStore::default();
+        let mut subscription = sample_url_sub("remote");
+        subscription.node_count = 2;
+        let subscription_id = subscription.id.clone();
+        store.subscriptions.push(subscription);
+
+        let mut announcement = stored_node(&subscription_id, "announcement");
+        announcement.node.name = "🇦🇶 [剩余: 20天]".into();
+        let real = stored_node(&subscription_id, "real");
+        store.nodes = vec![announcement, real];
+        store.settings.current_node_id = Some("announcement".into());
+
+        store.prune_remote_remark_nodes();
+
+        assert_eq!(store.nodes.len(), 1);
+        assert_eq!(store.nodes[0].node.id, "real");
+        assert_eq!(store.subscriptions[0].node_count, 1);
+        assert_eq!(store.settings.current_node_id.as_deref(), Some("real"));
     }
 
     #[test]

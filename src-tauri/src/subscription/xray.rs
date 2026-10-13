@@ -1,8 +1,8 @@
 //! Parse v2rayN / Xray JSON subscriptions into normalized nodes.
 
 use crate::domain::{
-    ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy, SubscriptionFormat, TlsConfig,
-    Transport,
+    normalize_vless_flow, ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy,
+    SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use crate::subscription::json_util::{
@@ -173,7 +173,9 @@ fn parse_protocol(
                 port,
                 ProtocolConfig::Vless {
                     uuid,
-                    flow: get_str(user, &["flow"]).or_else(|| get_str(settings, &["flow"])),
+                    flow: normalize_vless_flow(
+                        get_str(user, &["flow"]).or_else(|| get_str(settings, &["flow"])),
+                    ),
                     packet_encoding: "xudp".into(),
                 },
             ))

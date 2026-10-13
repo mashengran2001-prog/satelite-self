@@ -1,8 +1,8 @@
 //! Build / flatten a single proxy node from the add-config form.
 
 use crate::domain::{
-    ManualNodeDraft, ParseResult, Protocol, ProtocolConfig, ProxyNode, ShadowTlsOpts,
-    SubscriptionFormat, TlsConfig, Transport,
+    normalize_vless_flow, ManualNodeDraft, ParseResult, Protocol, ProtocolConfig, ProxyNode,
+    ShadowTlsOpts, SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use std::collections::BTreeMap;
@@ -290,7 +290,7 @@ fn build_config(draft: &ManualNodeDraft, protocol: Protocol) -> Result<ProtocolC
         }),
         Protocol::Vless => Ok(ProtocolConfig::Vless {
             uuid: req(&draft.uuid, "uuid")?,
-            flow: opt_nonempty(&draft.flow),
+            flow: normalize_vless_flow(opt_nonempty(&draft.flow)),
             packet_encoding: opt_nonempty(&draft.packet_encoding).unwrap_or_else(|| "xudp".into()),
         }),
         Protocol::Trojan => Ok(ProtocolConfig::Trojan {

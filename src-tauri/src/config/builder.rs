@@ -3,8 +3,9 @@
 use crate::config::dns_build::{build_dns_section, build_hosts_route_rules};
 use crate::config::punycode::to_ascii_domain;
 use crate::domain::{
-    AutoSelectMode, DnsSettings, ExtraInbound, OutboundMode, Protocol, ProtocolConfig, ProxyNode,
-    Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType, TlsConfig, Transport,
+    normalize_vless_flow, AutoSelectMode, DnsSettings, ExtraInbound, OutboundMode, Protocol,
+    ProtocolConfig, ProxyNode, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType, TlsConfig,
+    Transport,
 };
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
@@ -971,8 +972,8 @@ fn node_to_outbound(node: &ProxyNode) -> AppResult<(String, Value, Vec<Value>)> 
                 "uuid": uuid,
                 "packet_encoding": packet_encoding,
             });
-            if let Some(f) = flow {
-                if !f.is_empty() {
+            if let Some(f) = normalize_vless_flow(flow.clone()) {
+                if f == "xtls-rprx-vision" {
                     o["flow"] = json!(f);
                 }
             }
@@ -1457,6 +1458,45 @@ mod tests {
             latency_ms: None,
             latency_at: None,
         }
+    }
+
+    fn sample_vless(flow: &str) -> ProxyNode {
+        ProxyNode {
+            id: "5fffb3af3fb1a6b6f0f4302e16a22490".into(),
+            name: "VLESS-Legacy-Flow".into(),
+            protocol: Protocol::Vless,
+            server: "example.com".into(),
+            port: 443,
+            tls: Some(TlsConfig {
+                enabled: true,
+                server_name: Some("example.com".into()),
+                insecure: None,
+                alpn: None,
+                utls_fingerprint: None,
+                reality_public_key: None,
+                reality_short_id: None,
+            }),
+            transport: Some(Transport::Tcp),
+            udp: Some(true),
+            config: ProtocolConfig::Vless {
+                uuid: "22222222-2222-2222-2222-222222222222".into(),
+                flow: Some(flow.into()),
+                packet_encoding: "xudp".into(),
+            },
+            source: Some("vless".into()),
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    #[test]
+    fn vless_outbound_repairs_legacy_vision_flow_before_singbox_check() {
+        let (_, outbound, _) =
+            node_to_outbound(&sample_vless("xtls-rprx-vision-udp443-udp443")).unwrap();
+        assert_eq!(outbound["flow"], "xtls-rprx-vision");
+
+        let (_, unsupported, _) = node_to_outbound(&sample_vless("unsupported-flow")).unwrap();
+        assert!(unsupported.get("flow").is_none());
     }
 
     #[test]

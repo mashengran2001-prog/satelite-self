@@ -1,8 +1,8 @@
 //! Parse sing-box JSON (full config, `{ "outbounds": [...] }`, or a single outbound).
 
 use crate::domain::{
-    ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy, SubscriptionFormat, TlsConfig,
-    Transport,
+    normalize_vless_flow, ParseResult, Protocol, ProtocolConfig, ProxyNode, SkippedProxy,
+    SubscriptionFormat, TlsConfig, Transport,
 };
 use crate::error::{AppError, AppResult};
 use crate::subscription::json_util::{
@@ -363,7 +363,7 @@ fn parse_vless(
         parse_transport(map),
         ProtocolConfig::Vless {
             uuid,
-            flow: get_str(map, &["flow"]),
+            flow: normalize_vless_flow(get_str(map, &["flow"])),
             packet_encoding: get_str(map, &["packet_encoding", "packet-encoding"])
                 .unwrap_or_else(|| "xudp".into()),
         },

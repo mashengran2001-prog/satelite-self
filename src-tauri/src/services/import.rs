@@ -443,7 +443,7 @@ fn parse_userinfo_str(raw: &str) -> Option<SubscriptionTraffic> {
 
 /// Providers often inject fake proxies whose **names** carry quota text, e.g.
 /// `剩余流量：2.41 TB` / `套餐到期：长期有效`. Extract traffic and drop them.
-fn is_remark_name(name: &str) -> bool {
+pub(crate) fn is_remark_name(name: &str) -> bool {
     let mut traffic = SubscriptionTraffic::default();
     apply_remark_name(name, &mut traffic)
 }
@@ -467,9 +467,10 @@ fn split_remark_nodes(nodes: Vec<ProxyNode>) -> (Option<SubscriptionTraffic>, Ve
 
 /// Returns true if `name` is a remark / info node (should not be a real proxy).
 fn apply_remark_name(name: &str, traffic: &mut SubscriptionTraffic) -> bool {
-    let name = name.trim();
+    let normalized = normalize_remark_name(name);
+    let name = normalized.as_str();
     if name.is_empty() {
-        return false;
+        return true;
     }
 
     // 剩余流量：2.41 TB / 流量剩余: 100GB / 余量：…
@@ -492,6 +493,11 @@ fn apply_remark_name(name: &str, traffic: &mut SubscriptionTraffic) -> bool {
         }
         // "剩余：无限" etc.
         if is_unlimited_text(rest) {
+            return true;
+        }
+        // Remaining time / percentage are subscription metadata, not proxy
+        // names. Providers commonly wrap these in a syntactically valid node.
+        if rest.contains('%') || rest.contains('天') || rest.contains("小时") {
             return true;
         }
     }
@@ -585,6 +591,26 @@ fn apply_remark_name(name: &str, traffic: &mut SubscriptionTraffic) -> bool {
     false
 }
 
+/// Remove flags, brackets and decorative emoji before matching provider
+/// metadata. The first letter/digit (Unicode-aware) is a stable boundary for
+/// normal node names such as `[香港] 家宽`, while turning
+/// `🇦🇶 [剩余: 20 GB]` into `剩余: 20 GB]` for the label parser above.
+fn normalize_remark_name(name: &str) -> String {
+    let trimmed = name
+        .trim()
+        .trim_matches(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}', '\u{3164}']);
+    let Some((start, _)) = trimmed
+        .char_indices()
+        .find(|(_, ch)| ch.is_alphanumeric())
+    else {
+        return String::new();
+    };
+    trimmed[start..]
+        .trim()
+        .trim_matches(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}', '\u{3164}'])
+        .to_string()
+}
+
 fn strip_label<'a>(name: &'a str, labels: &[&str]) -> Option<&'a str> {
     for label in labels {
         if let Some(rest) = name.strip_prefix(label) {
@@ -611,6 +637,7 @@ fn is_unlimited_text(s: &str) -> bool {
 
 fn is_pure_info_label(name: &str) -> bool {
     let n = name.trim();
+    let compact: String = n.chars().filter(|ch| !ch.is_whitespace()).collect();
     matches!(
         n,
         "官网"
@@ -624,6 +651,11 @@ fn is_pure_info_label(name: &str) -> bool {
             | "Traffic"
             | "Expire"
     ) || n.starts_with("官网")
+        || compact.starts_with("中文官网")
+        || compact.starts_with("续费地址")
+        || compact.starts_with("订阅地址")
+        || compact.contains("请更新订阅")
+        || (compact.starts_with("去除") && compact.contains("线路"))
         || n.starts_with("http://")
         || n.starts_with("https://")
 }
@@ -651,7 +683,15 @@ fn parse_size_to_bytes(s: &str) -> Option<u64> {
     if !num.is_finite() || num < 0.0 {
         return None;
     }
-    let unit = s[i..].trim().to_ascii_lowercase().replace(' ', "");
+    let tail = s[i..].trim_start();
+    let unit: String = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if unit.is_empty() && !tail.is_empty() {
+        return None;
+    }
     let mult: f64 = match unit.as_str() {
         "" | "b" | "byte" | "bytes" => 1.0,
         "k" | "kb" | "kib" => 1024.0,
@@ -804,6 +844,27 @@ proxies:
         let rem = t.quota_remaining.unwrap();
         assert!(rem > 2 * 1024u64.pow(4));
         assert!(rem < 3 * 1024u64.pow(4));
+    }
+
+    #[test]
+    fn decorated_provider_announcements_are_not_imported_as_nodes() {
+        let announcements = [
+            "🇦🇶 [到期: 2026年11月01日]",
+            "🇦🇶 [剩余: 19天6小时10分钟]",
+            "🇦🇶 [剩余: 272.65 GB] 已用 27.35 GB",
+            "🇦🇶 🌔流量剩余: 90.88% [20天后重置流量]",
+            "🇦🇶 ‼️使用前 请更新订阅‼️⸝⸝⸝⸝ ᥫᩣ",
+            "🇦🇶 ㅤㅤ",
+            "🇦🇶 ✅中文官网：落云.com",
+            "🇦🇶 ✅续费地址：12.kg",
+            "🇦🇶 去除8条不合适线路",
+        ];
+        for name in announcements {
+            assert!(is_remark_name(name), "announcement was kept: {name}");
+        }
+
+        assert!(!is_remark_name("[香港] 家宽住宅₂"));
+        assert!(!is_remark_name("🇯🇵 日本 IEPL 01"));
     }
 
     #[test]
